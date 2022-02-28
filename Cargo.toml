@@ -6,7 +6,7 @@ edition = "2021"
 description = "attempt to downcast the triat object to a concrete type"
 repository = "https://github.com/GaiaWorld/pi_bon.git"
 license = "MIT OR Apache-2.0"
-keywords = ["pi", "downcast", "pi_bon", "serialize"]
+keywords = ["pi", "pi_bon", "serialize"]
 
 [dependencies]
 pi_data_view = "*"
