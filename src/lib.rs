@@ -4,7 +4,7 @@
 //!
 //! 本模块定义了一个使用二进制表示数据的协议，并实现该协议
 //!
-//! 模块提供写的接口，将数据按照协议序列化为二进制。 
+//! 模块提供写的接口，将数据按照协议序列化为二进制。
 //!
 //! 提供读的接口，将满足协议的二进制反序列化为数据。
 //!
@@ -43,11 +43,9 @@
 //! TODO 定义一个全类型的枚举 enum BonType<T>， ReadNext WriteNext 的 T 应该为BonType。提供一个 read(&self) -> BonType<T>
 
 #![allow(warnings)]
-
 #![feature(exclusive_range_pattern)]
 #![feature(test)]
 #[warn(unconditional_recursion)]
-
 extern crate pi_data_view;
 
 use std::cmp::{Eq, Ord, Ordering, PartialEq, PartialOrd};
@@ -60,6 +58,7 @@ use std::ops::Deref;
 use std::ops::Range;
 use std::sync::Arc;
 
+use num_bigint::{BigInt, Sign};
 use pi_data_view::{GetView, SetView};
 
 /// ReadBuffer，用于将二进制反序列化为对应数据
@@ -1816,7 +1815,10 @@ pub fn partial_cmp<'a>(b1: &mut ReadBuffer<'a>, b2: &mut ReadBuffer<'a>) -> Opti
     let err = "partial_cmp err";
     let t1 = b1.get_type().expect(err);
     let t2 = b2.get_type().expect(err);
-    //println!("{:?}, {:?}, {}, {}, {:?}, {:?}", t1, t2, b1.head, b2.head, &b1, &b2);
+    // println!(
+    //     "###########################t1:{:?}, t2:{:?}, b1.head:{}, b2.head:{}, b1:{:?}, b2:{:?}",
+    //     t1, t2, b1.head, b2.head, &b1, &b2
+    // );
     match (t1, t2) {
         (3..8, 3..42) => {
             // b1是浮点数， b2是数字,需要读取比较对象的值进行比较
@@ -1935,6 +1937,15 @@ pub fn partial_cmp<'a>(b1: &mut ReadBuffer<'a>, b2: &mut ReadBuffer<'a>) -> Opti
         (_, 0) => {
             return Some(Ordering::Greater);
         }
+        (249, 249) => {
+            // b1.head += 32;
+            // b2.head += 32;
+            // b1.bytes[b1.head - 32..b1.head].partial_cmp(&b2.bytes[b2.head - 32..b2.head])
+            // BigInt::from_bytes_le(Sign::Plus, &b1.bytes[b1.head - 32..b1.head]);
+            let b1n = to_bigint(b1);
+            let b2n = to_bigint(b2);
+            return b1n.partial_cmp(&b2n);
+        }
         _ => {
             // b1是容器， b2也是二进制，需要读值比二进制数据的大小
             if t2 < 180 {
@@ -1948,6 +1959,18 @@ pub fn partial_cmp<'a>(b1: &mut ReadBuffer<'a>, b2: &mut ReadBuffer<'a>) -> Opti
             }
         }
     }
+}
+
+fn to_bigint<'a>(bb: &mut ReadBuffer<'a>) -> BigInt {
+    let mut base = BigInt::from(1);
+    let mut n = BigInt::from(0);
+    let mut c = BigInt::from(4294967296 as i64);
+    for _ in 0..7 {
+        bb.head += 4;
+        n += BigInt::from_bytes_le(Sign::Plus, &bb.bytes[bb.head - 4..bb.head]);
+        base *= &c;
+    }
+    n
 }
 
 pub fn base_type_len(bb: &ReadBuffer, t: u8) -> usize {
