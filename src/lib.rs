@@ -1965,7 +1965,8 @@ fn to_bigint<'a>(bb: &mut ReadBuffer<'a>) -> BigInt {
     let mut base = BigInt::from(1);
     let mut n = BigInt::from(0);
     let mut c = BigInt::from(4294967296 as i64);
-    for _ in 0..7 {
+    bb.head += 1;
+    for _ in 0..=7 {
         bb.head += 4;
         n += BigInt::from_bytes_le(Sign::Plus, &bb.bytes[bb.head - 4..bb.head]);
         base *= &c;
@@ -1995,8 +1996,9 @@ pub fn base_type_len(bb: &ReadBuffer, t: u8) -> usize {
         108 | 177 => bb.bytes.get_lu16(bb.head + 1) as usize + 3,
         109 | 178 => bb.bytes.get_lu32(bb.head + 1) as usize + 5,
         110 | 179 => bb.bytes.get_lu32(bb.head + 1) as usize + 7,
+        249 | 250 => 32,
         _ => {
-            panic!("other type TODO base_type_len");
+            panic!("other type TODO base_type_len type:{:?}", t);
         }
     }
 }
