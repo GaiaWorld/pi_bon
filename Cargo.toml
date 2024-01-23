@@ -1,6 +1,6 @@
 [package]
 name = "pi_bon"
-version = "0.2.1"
+version = "0.2.2"
 authors = ["suncy <530739162@qq.com>"]
 edition = "2021"
 description = "attempt to downcast the triat object to a concrete type"
