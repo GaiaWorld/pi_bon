@@ -46,8 +46,7 @@
 #![feature(exclusive_range_pattern)]
 #![feature(test)]
 #[warn(unconditional_recursion)]
-extern crate pi_data_view;
-
+// extern crate pi_data_view;
 use std::cmp::{Eq, Ord, Ordering, PartialEq, PartialOrd};
 use std::collections::HashMap;
 use std::error::Error;
@@ -58,8 +57,8 @@ use std::ops::Deref;
 use std::ops::Range;
 use std::sync::Arc;
 
+use bytes::{Buf, BufMut, Bytes};
 use num_bigint::{BigInt, Sign};
-use pi_data_view::{GetView, SetView};
 
 /// ReadBuffer，用于将二进制反序列化为对应数据
 #[derive(Default, Clone, Debug)]
@@ -151,9 +150,8 @@ impl<'a> PartialOrd for ReadBuffer<'a> {
     fn partial_cmp(&self, other: &ReadBuffer<'a>) -> Option<Ordering> {
         let mut b1 = ReadBuffer::new(self.bytes, 0);
         let mut b2 = ReadBuffer::new(other.bytes, 0);
-
-        let b1_type = b1.get_type().unwrap();
-        let b2_type = b2.get_type().unwrap();
+        let b1_type = b1.get_type_chunk().unwrap();
+        let b2_type = b2.get_type_chunk().unwrap();
 
         let is_b1_container = b1_type >= 180 && b1_type < 249;
         let is_b2_container = b2_type >= 180 && b2_type < 249;
@@ -166,7 +164,7 @@ impl<'a> PartialOrd for ReadBuffer<'a> {
                 248 => b1.head += 1 + 6 + 4,
                 _ => panic!("unknown container type {:?}", b1_type),
             }
-
+            b1.bytes.advance(b1.head);
             match b2_type {
                 180..246 => b2.head += 1 + 1 + 4,
                 246 => b2.head += 1 + 2 + 4,
@@ -174,13 +172,14 @@ impl<'a> PartialOrd for ReadBuffer<'a> {
                 248 => b2.head += 1 + 6 + 4,
                 _ => panic!("unknown container type {:?}", b2_type),
             }
+            b2.bytes.advance(b2.head);
         }
 
         loop {
             match partial_cmp(&mut b1, &mut b2) {
                 None => return None,
                 Some(Ordering::Equal) => {
-                    if b1.head == b1.len() {
+                    if b1.len() == 0 {
                         return Some(Ordering::Equal);
                     }
                 }
@@ -232,15 +231,21 @@ impl<'a> ReadBuffer<'a> {
     }
 
     /// 获取接下来要反序列化的数据的类型
-    pub fn get_type(&self) -> Result<u8, ReadBonErr> {
+    pub fn get_type(&mut self) -> Result<u8, ReadBonErr> {
         self.probe_border(1)?;
-        Ok(self.bytes.get_u8(self.head))
+        Ok(self.bytes.get_u8())
+    }
+
+    /// 获取接下来要反序列化的数据的类型(不改变bytes偏移)
+    pub fn get_type_chunk(&mut self) -> Result<u8, ReadBonErr> {
+        self.probe_border(1)?;
+        Ok(self.bytes.chunk()[0])
     }
 
     /// 读一个布尔类型，如果二进制当前的值不是布尔类型，返回Err
     pub fn read_bool(&mut self) -> Result<bool, ReadBonErr> {
         self.probe_border(1)?;
-        let t = self.bytes.get_u8(self.head);
+        let t = self.bytes.get_u8();
         self.head += 1;
         match t {
             1 => Ok(false),
@@ -322,7 +327,7 @@ impl<'a> ReadBuffer<'a> {
     /// 读一个f32类型，如果二进制当前的值不是f32类型，返回Err
     pub fn read_f32(&mut self) -> Result<f32, ReadBonErr> {
         self.probe_border(1)?;
-        let t = self.bytes.get_u8(self.head);
+        let t = self.bytes.get_u8();
         self.head += 1;
         match t {
             3 => Ok(0.0),
@@ -330,7 +335,7 @@ impl<'a> ReadBuffer<'a> {
             5..7 => {
                 self.probe_border(4)?;
                 self.head += 4;
-                Ok(self.bytes.get_lf32(self.head - 4))
+                Ok(self.bytes.get_f32_le())
             }
             _ => {
                 self.head -= 1;
@@ -349,7 +354,7 @@ impl<'a> ReadBuffer<'a> {
     /// 读一个f64类型，如果二进制当前的值不是f64类型，返回Err
     pub fn read_f64(&mut self) -> Result<f64, ReadBonErr> {
         self.probe_border(1)?;
-        let t = self.bytes.get_u8(self.head);
+        let t = self.bytes.get_u8();
         self.head += 1;
         match t {
             3 => Ok(0.0),
@@ -357,12 +362,12 @@ impl<'a> ReadBuffer<'a> {
             6 => {
                 self.probe_border(4)?;
                 self.head += 4;
-                Ok(self.bytes.get_lf32(self.head - 4) as f64)
+                Ok(self.bytes.get_f32_le() as f64)
             }
             7 => {
                 self.probe_border(8)?;
                 self.head += 8;
-                Ok(self.bytes.get_lf64(self.head - 8))
+                Ok(self.bytes.get_f64_le())
             }
             _ => {
                 self.head -= 1;
@@ -381,16 +386,18 @@ impl<'a> ReadBuffer<'a> {
     /// 读出一个动态长度，正整数，不允许大于0x20000000
     pub fn read_lengthen(&mut self) -> Result<u32, ReadBonErr> {
         self.probe_border(1)?;
-        let t = self.bytes.get_u8(self.head);
+        // let t = self.bytes.get_u8();
+        let t = self.get_type_chunk().unwrap();
         if t < 0x80 {
             self.head += 1;
+            self.bytes.advance(1);
             Ok(t as u32)
         } else if t < 0xC0 {
             self.head += 2;
-            Ok(self.bytes.get_bu16(self.head - 2) as u32 - 0x8000)
+            Ok(self.bytes.get_u16_ne() as u32 - 0x8000)
         } else if t < 0xE0 {
             self.head += 4;
-            Ok(self.bytes.get_bu32(self.head - 4) as u32 - 0xC0000000)
+            Ok(self.bytes.get_u32_ne() as u32 - 0xC0000000)
         } else {
             return Err(ReadBonErr::type_no_match(
                 "lengthen".to_string(),
@@ -403,7 +410,7 @@ impl<'a> ReadBuffer<'a> {
     // 读一个二进制类型，如果二进制当前的值不是二进制类型，返回Err
     pub fn read_bin(&mut self) -> Result<Vec<u8>, ReadBonErr> {
         self.probe_border(1)?;
-        let t = self.bytes.get_u8(self.head);
+        let t = self.bytes.get_u8();
         self.head += 1;
         let len: usize;
         if t >= 111 && t <= 175 {
@@ -412,20 +419,20 @@ impl<'a> ReadBuffer<'a> {
         } else {
             match t {
                 176 => {
-                    len = self.bytes.get_u8(self.head) as usize as usize;
+                    len = self.bytes.get_u8() as usize as usize;
                     self.head += len + 1;
                 }
                 177 => {
-                    len = self.bytes.get_lu16(self.head) as usize;
+                    len = self.bytes.get_u16_le() as usize;
                     self.head += len + 2;
                 }
                 178 => {
-                    len = self.bytes.get_lu32(self.head) as usize;
+                    len = self.bytes.get_u32_le() as usize;
                     self.head += len + 4;
                 }
                 179 => {
-                    len = self.bytes.get_lu16(self.head) as usize
-                        + (self.bytes.get_lu32(self.head + 2) * 0x10000) as usize;
+                    len = self.bytes.get_u16_le() as usize
+                        + (self.bytes.get_u32_le() * 0x10000) as usize;
                     self.head += len + 6;
                 }
                 _ => {
@@ -438,18 +445,14 @@ impl<'a> ReadBuffer<'a> {
             };
         }
 
-        let mut dst = Vec::with_capacity(len);
-        unsafe {
-            dst.set_len(len);
-        }
-        (&mut dst).clone_from_slice(&self.bytes[self.head - len..self.head]);
+        let dst = self.bytes.copy_to_bytes(len).to_vec();
         Ok(dst)
     }
 
     /// 读一个utf8编码的字符串类型，如果二进制当前的值不是utf8编码的字符串类型类型，返回Err
     pub fn read_utf8(&mut self) -> Result<String, ReadBonErr> {
         self.probe_border(1)?;
-        let t = self.bytes.get_u8(self.head);
+        let t = self.bytes.get_u8();
         self.head += 1;
         let len: usize;
         if t >= 42 && t <= 106 {
@@ -458,20 +461,20 @@ impl<'a> ReadBuffer<'a> {
         } else {
             match t {
                 107 => {
-                    len = self.bytes.get_u8(self.head) as usize as usize;
+                    len = self.bytes.get_u8() as usize as usize;
                     self.head += len + 1;
                 }
                 108 => {
-                    len = self.bytes.get_lu16(self.head) as usize;
+                    len = self.bytes.get_u16_le() as usize;
                     self.head += len + 2;
                 }
                 109 => {
-                    len = self.bytes.get_lu32(self.head) as usize;
+                    len = self.bytes.get_u32_le() as usize;
                     self.head += len + 4;
                 }
                 110 => {
-                    len = self.bytes.get_lu16(self.head) as usize
-                        + (self.bytes.get_lu32(self.head + 2) * 0x10000) as usize;
+                    len = self.bytes.get_u16_le() as usize
+                        + (self.bytes.get_u32_le() * 0x10000) as usize;
                     self.head += len + 6;
                 }
                 _ => {
@@ -484,15 +487,8 @@ impl<'a> ReadBuffer<'a> {
             }
         }
 
-        let mut dst = Vec::with_capacity(len);
-        unsafe {
-            dst.set_len(len);
-        }
-        (&mut dst).clone_from_slice(&self.bytes[self.head - len..self.head]);
-        match String::from_utf8(dst) {
-            Ok(s) => Ok(s),
-            Err(e) => Err(ReadBonErr::other(e.to_string())),
-        }
+        let dst = self.bytes.copy_to_bytes(len);
+        Ok(String::from_utf8_lossy(&*dst).to_string())
     }
 
     /// 读一个容器类型，如果二进制当前的值不是容器类型，返回Err
@@ -501,7 +497,7 @@ impl<'a> ReadBuffer<'a> {
         F: FnOnce(&mut ReadBuffer, u32, u64) -> Result<T, ReadBonErr>,
     {
         self.probe_border(1)?;
-        let t = self.bytes.get_u8(self.head);
+        let t = self.bytes.get_u8();
         self.head += 1;
         let len: u64;
         if t >= 180 && t <= 244 {
@@ -510,20 +506,20 @@ impl<'a> ReadBuffer<'a> {
         } else {
             match t {
                 245 => {
-                    len = self.bytes.get_u8(self.head) as u64;
+                    len = self.bytes.get_u8() as u64;
                     self.head += 5;
                 }
                 246 => {
-                    len = self.bytes.get_lu16(self.head) as u64;
+                    len = self.bytes.get_u16_le() as u64;
                     self.head += 6;
                 }
                 247 => {
-                    len = self.bytes.get_lu32(self.head) as u64;
+                    len = self.bytes.get_u32_le() as u64;
                     self.head += 8;
                 }
                 248 => {
-                    len = self.bytes.get_lu16(self.head) as u64
-                        + (self.bytes.get_lu32(self.head + 2) * 0x10000) as u64;
+                    len =
+                        self.bytes.get_u16_le() as u64 + (self.bytes.get_u32_le() * 0x10000) as u64;
                     self.head += 10;
                 }
                 _ => {
@@ -535,16 +531,18 @@ impl<'a> ReadBuffer<'a> {
                 }
             }
         }
-        let tt = self.bytes.get_lu32(self.head - 4);
+        let tt = self.bytes.get_u32_le();
         read_next(self, tt, len)
     }
 
     /// 下一个值是否为None
     pub fn is_nil(&mut self) -> Result<bool, ReadBonErr> {
         self.probe_border(1)?;
-        let first = self.bytes.get_u8(self.head);
+        // let first = self.bytes.get_u8();
+        let first = self.get_type_chunk().unwrap();
         if first == 0 {
             self.head += 1;
+            self.bytes.advance(1);
             Ok(true)
         } else {
             Ok(false)
@@ -554,7 +552,7 @@ impl<'a> ReadBuffer<'a> {
     /// 读下一个数据，已经读到最后，返回Err。否则，返回下一个数据
     pub fn read(&mut self) -> Result<EnumValue, ReadBonErr> {
         self.probe_border(1)?;
-        let first = self.bytes.get_u8(self.head);
+        let first = self.bytes.get_u8();
         self.head += 1;
         match first {
             0 => Ok(EnumValue::Void),
@@ -567,11 +565,11 @@ impl<'a> ReadBuffer<'a> {
             }
             6 => {
                 self.head += 4;
-                Ok(EnumValue::F32(self.bytes.get_lf32(self.head - 4)))
+                Ok(EnumValue::F32(self.bytes.get_f32_le()))
             }
             7 => {
                 self.head += 8;
-                Ok(EnumValue::F64(self.bytes.get_lf64(self.head - 8)))
+                Ok(EnumValue::F64(self.bytes.get_f64_le()))
             }
             8 => {
                 panic!("128 bit floating-point number temporarily unsupported");
@@ -580,59 +578,55 @@ impl<'a> ReadBuffer<'a> {
             16..36 => Ok(EnumValue::U8(first - 10)),
             36 => {
                 self.head += 1;
-                Ok(EnumValue::U8(self.bytes.get_u8(self.head - 1)))
+                Ok(EnumValue::U8(self.bytes.get_u8()))
             }
             37 => {
                 self.head += 2;
-                Ok(EnumValue::U16(self.bytes.get_lu16(self.head - 2)))
+                Ok(EnumValue::U16(self.bytes.get_u16_le()))
             }
             38 => {
                 self.head += 4;
-                Ok(EnumValue::U32(self.bytes.get_lu32(self.head - 4)))
+                Ok(EnumValue::U32(self.bytes.get_u32_le()))
             }
             39 => {
                 self.head += 6;
                 Ok(EnumValue::U64(
-                    self.bytes.get_lu16(self.head - 6) as u64
-                        + ((self.bytes.get_lu32(self.head - 4) as u64) << 16),
+                    self.bytes.get_u16_le() as u64 + ((self.bytes.get_u32_le() as u64) << 16),
                 ))
             }
             40 => {
                 self.head += 8;
-                Ok(EnumValue::U64(self.bytes.get_lu64(self.head - 8) as u64))
+                Ok(EnumValue::U64(self.bytes.get_u64_le() as u64))
             }
             41 => {
                 self.head += 16;
-                Ok(EnumValue::U128(self.bytes.get_lu128(self.head - 8) as u128))
+                Ok(EnumValue::U128(self.bytes.get_u128_le() as u128))
             }
             9 => {
                 self.head += 1;
-                Ok(EnumValue::I16(-(self.bytes.get_u8(self.head - 1) as i16)))
+                Ok(EnumValue::I16(-(self.bytes.get_u8() as i16)))
             }
             10 => {
                 self.head += 2;
-                Ok(EnumValue::I32(-(self.bytes.get_lu16(self.head - 2) as i32)))
+                Ok(EnumValue::I32(-(self.bytes.get_u16_le() as i32)))
             }
             11 => {
                 self.head += 4;
-                Ok(EnumValue::I64(-(self.bytes.get_lu32(self.head - 4) as i64)))
+                Ok(EnumValue::I64(-(self.bytes.get_u32_le() as i64)))
             }
             12 => {
                 self.head += 6;
                 Ok(EnumValue::I64(
-                    -(self.bytes.get_lu16(self.head - 6) as i64)
-                        - ((self.bytes.get_lu32(self.head - 4) as i64) << 16),
+                    -(self.bytes.get_u16_le() as i64) - ((self.bytes.get_u32_le() as i64) << 16),
                 ))
             }
             13 => {
                 self.head += 8;
-                Ok(EnumValue::I64(-(self.bytes.get_lu64(self.head - 8) as i64)))
+                Ok(EnumValue::I64(-(self.bytes.get_u64_le() as i64)))
             }
             14 => {
                 self.head += 16;
-                Ok(EnumValue::I128(
-                    -(self.bytes.get_lu128(self.head - 16) as i128),
-                ))
+                Ok(EnumValue::I128(-(self.bytes.get_u128_le() as i128)))
             }
             42..111 => {
                 self.head -= 1;
@@ -655,7 +649,7 @@ impl<'a> ReadBuffer<'a> {
         &mut self,
     ) -> Result<T, ReadBonErr> {
         self.probe_border(1)?;
-        let t = self.bytes.get_u8(self.head);
+        let t = self.bytes.get_u8();
         self.head += 1;
         if t >= 15 && t <= 35 {
             Ok(T::from((t as i32) - 16))
@@ -663,57 +657,56 @@ impl<'a> ReadBuffer<'a> {
             match t {
                 9 => {
                     self.head += 1;
-                    Ok(T::from(-(self.bytes.get_u8(self.head - 1) as i32)))
+                    Ok(T::from(-(self.bytes.get_u8() as i32)))
                 }
                 10 => {
                     self.head += 2;
-                    Ok(T::from(-(self.bytes.get_lu16(self.head - 2) as i32)))
+                    Ok(T::from(-(self.bytes.get_u16_le() as i32)))
                 }
                 11 => {
                     self.head += 4;
-                    Ok(T::from(-(self.bytes.get_lu32(self.head - 4) as i64)))
+                    Ok(T::from(-(self.bytes.get_u32_le() as i64)))
                 }
                 12 => {
                     self.head += 6;
                     Ok(T::from(
-                        -(self.bytes.get_lu16(self.head - 6) as i64)
-                            - ((self.bytes.get_lu32(self.head - 4) as i64) << 16),
+                        -(self.bytes.get_u16_le() as i64)
+                            - ((self.bytes.get_u32_le() as i64) << 16),
                     ))
                 }
                 13 => {
                     self.head += 8;
-                    Ok(T::from(-(self.bytes.get_lu64(self.head - 8) as i64)))
+                    Ok(T::from(-(self.bytes.get_u64_le() as i64)))
                 }
                 14 => {
                     self.head += 16;
-                    Ok(T::from(-(self.bytes.get_lu128(self.head - 16) as i128)))
+                    Ok(T::from(-(self.bytes.get_u128_le() as i128)))
                 }
                 36 => {
                     self.head += 1;
-                    Ok(T::from(self.bytes.get_u8(self.head - 1) as u32))
+                    Ok(T::from(self.bytes.get_u8() as u32))
                 }
                 37 => {
                     self.head += 2;
-                    Ok(T::from(self.bytes.get_lu16(self.head - 2) as u32))
+                    Ok(T::from(self.bytes.get_u16_le() as u32))
                 }
                 38 => {
                     self.head += 4;
-                    Ok(T::from(self.bytes.get_lu32(self.head - 4)))
+                    Ok(T::from(self.bytes.get_u32_le()))
                 }
                 39 => {
                     self.head += 6;
                     Ok(T::from(
-                        self.bytes.get_lu16(self.head - 6) as u64
-                            + ((self.bytes.get_lu32(self.head - 4) as u64) << 16),
+                        self.bytes.get_u16_le() as u64 + ((self.bytes.get_u32_le() as u64) << 16),
                     ))
                 }
                 40 => {
                     self.head += 8;
-                    Ok(T::from(self.bytes.get_lu64(self.head - 8) as u64))
+                    Ok(T::from(self.bytes.get_u64_le() as u64))
                 }
                 41 => {
                     self.head += 8;
-                    Ok(T::from(self.bytes.get_lu128(self.head - 8) as u128))
+                    Ok(T::from(self.bytes.get_u128_le() as u128))
                 }
                 _ => {
                     println!("read integer error, act_type: {}, bin: {:?}", t, self.bytes);
@@ -730,8 +723,8 @@ impl<'a> ReadBuffer<'a> {
     //探测边界， 如果越界， 返回错误
     #[inline]
     fn probe_border(&self, len: usize) -> Result<(), ReadBonErr> {
-        if self.head + len > self.bytes.len() {
-            return Err(ReadBonErr::overflow(self.head, self.bytes.len()));
+        if len > self.bytes.len() {
+            return Err(ReadBonErr::overflow(len, self.bytes.len()));
         } else {
             return Ok(());
         }
@@ -879,20 +872,17 @@ impl WriteBuffer {
     /// 写一个None
     pub fn write_nil(&mut self) {
         self.try_extend_capity(1);
-        self.bytes.set_u8(0, self.tail);
+        self.bytes.put_u8(0);
         self.tail += 1;
     }
 
     /// 写一个bool
     pub fn write_bool(&mut self, v: bool) {
         self.try_extend_capity(1);
-        self.bytes.set_u8(
-            match v {
-                true => 2,
-                false => 1,
-            },
-            self.tail,
-        );
+        self.bytes.put_u8(match v {
+            true => 2,
+            false => 1,
+        });
         self.tail += 1;
     }
 
@@ -900,19 +890,19 @@ impl WriteBuffer {
     pub fn write_f32(&mut self, v: f32) {
         if v == 0.0 {
             self.try_extend_capity(1);
-            self.bytes.set_u8(3, self.tail);
+            self.bytes.put_u8(3);
             self.tail += 1;
             return;
         }
         if v == 1.0 {
             self.try_extend_capity(1);
-            self.bytes.set_u8(4, self.tail);
+            self.bytes.put_u8(4);
             self.tail += 1;
             return;
         }
         self.try_extend_capity(5);
-        self.bytes.set_u8(6, self.tail);
-        self.bytes.set_lf32(v, self.tail + 1);
+        self.bytes.put_u8(6);
+        self.bytes.put_f32_le(v);
         self.tail += 5;
     }
 
@@ -920,19 +910,19 @@ impl WriteBuffer {
     pub fn write_f64(&mut self, v: f64) {
         if v == 0.0 {
             self.try_extend_capity(1);
-            self.bytes.set_u8(3, self.tail);
+            self.bytes.put_u8(3);
             self.tail += 1;
             return;
         }
         if v == 1.0 {
             self.try_extend_capity(1);
-            self.bytes.set_u8(4, self.tail);
+            self.bytes.put_u8(4);
             self.tail += 1;
             return;
         }
         self.try_extend_capity(9);
-        self.bytes.set_u8(7, self.tail);
-        self.bytes.set_lf64(v, self.tail + 1);
+        self.bytes.put_u8(7);
+        self.bytes.put_f64_le(v);
         self.tail += 9;
     }
     /// 写入一个动态长度，正整数，不允许大于0x20000000。
@@ -942,15 +932,15 @@ impl WriteBuffer {
     pub fn write_lengthen(&mut self, t: u32) {
         if t < 0x80 {
             self.try_extend_capity(1);
-            self.bytes.set_u8(t as u8, self.tail);
+            self.bytes.put_u8(t as u8);
             self.tail += 1;
         } else if t < 0x4000 {
             self.try_extend_capity(2);
-            self.bytes.set_bu16((0x8000 + t) as u16, self.tail);
+            self.bytes.put_u16_ne((0x8000 + t) as u16);
             self.tail += 2;
         } else if t < 0x20000000 {
             self.try_extend_capity(4);
-            self.bytes.set_bu32((0xC0000000 + t) as u32, self.tail);
+            self.bytes.put_u32_ne((0xC0000000 + t) as u32);
             self.tail += 4;
         } else {
             panic!("invalid lengthen, it's {}", t);
@@ -1033,37 +1023,38 @@ impl WriteBuffer {
             let offset = len_bytes1 - len_bytes;
             let l = self.bytes.len();
             self.try_extend_capity(l + offset - capacity);
-            self.bytes.move_part(t..l, t + offset);
+            // self.bytes.move_part(t..l, t + offset);
+            move_part(&mut self.bytes, t..l, t + offset);
             self.tail += offset;
         }
         // 根据实际的限制大小，写入实际长度
         match limit_size {
             64 => {
-                self.bytes.set_u8((180 + len) as u8, t);
+                self.bytes.put_u8((180 + len) as u8);
             }
             0xff => {
-                self.bytes.set_u8(245, t);
-                self.bytes.set_u8(len as u8, t + 1);
+                self.bytes.put_u8(245);
+                self.bytes.put_u8(len as u8);
             }
             0xffff => {
                 let mut v: Vec<u8> = Vec::with_capacity(1 + 2 + self.bytes.len());
-                v.set_u8(246, 0);
-                v.set_lu16(len as u16, 1);
+                v.put_u8(246);
+                v.put_u16_le(len as u16);
                 v.extend_from_slice(&self.bytes);
                 std::mem::replace(&mut self.bytes, v);
             }
             0xffffffff => {
                 let mut v: Vec<u8> = Vec::with_capacity(1 + 4 + self.bytes.len());
-                v.set_u8(247, 0);
-                v.set_lu32(len as u32, 1);
+                v.put_u8(247);
+                v.put_u32_le(len as u32);
                 v.extend_from_slice(&self.bytes);
                 std::mem::replace(&mut self.bytes, v);
             }
             0xffffffffffff => {
                 let mut v: Vec<u8> = Vec::with_capacity(1 + 6 + self.bytes.len());
-                v.set_u8(248, 0);
-                v.set_lu16((len & 0xffff) as u16, 1);
-                v.set_lu32((len >> 16) as u32, 3);
+                v.put_u8(248);
+                v.put_u16_le((len & 0xffff) as u16);
+                v.put_u32_le((len >> 16) as u32);
                 std::mem::replace(&mut self.bytes, v);
             }
 
@@ -1097,37 +1088,37 @@ impl WriteBuffer {
         if length <= 64 {
             self.try_extend_capity(1 + length);
             // 长度小于等于64， 本字节直接表达
-            self.bytes.set_u8(t + length as u8, self.tail);
+            self.bytes.put_u8(t + length as u8);
             self.tail += 1;
         } else if length <= 0xff {
             self.try_extend_capity(2 + length);
             // 长度小于256， 用下一个1字节记录
-            self.bytes.set_u8(t + 65, self.tail);
-            self.bytes.set_u8(length as u8, self.tail + 1);
+            self.bytes.put_u8(t + 65);
+            self.bytes.put_u8(length as u8);
             self.tail += 2;
         } else if length <= 0xffff {
             self.try_extend_capity(3 + length);
-            self.bytes.set_u8(t + 66, self.tail);
-            self.bytes.set_lu16(length as u16, self.tail + 1);
+            self.bytes.put_u8(t + 66);
+            self.bytes.put_u16_le(length as u16);
             self.tail += 3;
         } else if length <= 0xffffffff {
             self.try_extend_capity(5 + length);
-            self.bytes.set_u8(t + 67, self.tail);
-            self.bytes.set_lu32(length as u32, self.tail + 1);
+            self.bytes.put_u8(t + 67);
+            self.bytes.put_u32_le(length as u32);
             self.tail += 5;
         } else if length as u64 <= 0xffffffffffff {
             self.try_extend_capity(7 + length);
-            self.bytes.set_u8(t + 68, self.tail);
-            self.bytes.set_lu16((length & 0xffff) as u16, self.tail + 1);
-            self.bytes.set_lu32((length >> 16) as u32, self.tail + 3);
+            self.bytes.put_u8(t + 68);
+            self.bytes.put_u16_le((length & 0xffff) as u16);
+            self.bytes.put_u32_le((length >> 16) as u32);
             self.tail += 7;
         } else {
             self.try_extend_capity(9 + length);
-            self.bytes.set_u8(t + 69, self.tail);
-            self.bytes.set_lu64(t as u64, self.tail + 1);
+            self.bytes.put_u8(t + 69);
+            self.bytes.put_u64_le(t as u64);
             self.tail += 9;
         }
-        self.bytes.set(arr, self.tail);
+        self.bytes.put(arr);
         self.tail += length;
     }
 
@@ -1268,7 +1259,7 @@ impl WriteBuffer {
     #[inline]
     fn write_common(&mut self, v: i8) {
         self.try_extend_capity(1);
-        self.bytes.set_u8((v + 16) as u8, self.tail);
+        self.bytes.put_u8((v + 16) as u8);
         self.tail += 1;
     }
 
@@ -1276,8 +1267,8 @@ impl WriteBuffer {
     #[inline]
     fn write_8(&mut self, v: u8, t: u8) {
         self.try_extend_capity(2);
-        self.bytes.set_u8(t, self.tail);
-        self.bytes.set_u8(v, self.tail + 1);
+        self.bytes.put_u8(t);
+        self.bytes.put_u8(v);
         self.tail += 2;
     }
 
@@ -1285,8 +1276,8 @@ impl WriteBuffer {
     #[inline]
     fn write_16(&mut self, v: u16, t: u8) {
         self.try_extend_capity(3);
-        self.bytes.set_u8(t, self.tail);
-        self.bytes.set_lu16(v as u16, self.tail + 1);
+        self.bytes.put_u8(t);
+        self.bytes.put_u16_le(v as u16);
         self.tail += 3;
     }
 
@@ -1294,8 +1285,8 @@ impl WriteBuffer {
     #[inline]
     fn write_32(&mut self, v: u32, t: u8) {
         self.try_extend_capity(5);
-        self.bytes.set_u8(t, self.tail);
-        self.bytes.set_lu32(v as u32, self.tail + 1);
+        self.bytes.put_u8(t);
+        self.bytes.put_u32_le(v as u32);
         self.tail += 5;
     }
 
@@ -1303,9 +1294,9 @@ impl WriteBuffer {
     #[inline]
     fn write_48(&mut self, v: u64, t: u8) {
         self.try_extend_capity(7);
-        self.bytes.set_u8(t, self.tail);
-        self.bytes.set_lu16((v & 0xffff) as u16, self.tail + 1);
-        self.bytes.set_lu32((v >> 16) as u32, self.tail + 3);
+        self.bytes.put_u8(t);
+        self.bytes.put_u16_le((v & 0xffff) as u16);
+        self.bytes.put_u32_le((v >> 16) as u32);
         self.tail += 7;
     }
 
@@ -1313,8 +1304,8 @@ impl WriteBuffer {
     #[inline]
     fn write_64(&mut self, v: u64, t: u8) {
         self.try_extend_capity(9);
-        self.bytes.set_u8(t, self.tail);
-        self.bytes.set_lu64(v as u64, self.tail + 1);
+        self.bytes.put_u8(t);
+        self.bytes.put_u64_le(v as u64);
         self.tail += 9;
     }
 
@@ -1322,8 +1313,8 @@ impl WriteBuffer {
     #[inline]
     fn write_128(&mut self, v: u128, t: u8) {
         self.try_extend_capity(17);
-        self.bytes.set_u8(t, self.tail);
-        self.bytes.set_lu128(v, self.tail + 1);
+        self.bytes.put_u8(t);
+        self.bytes.put_u128_le(v);
         self.tail += 17;
     }
 }
@@ -1813,8 +1804,9 @@ impl<T: Decode> Decode for Option<T> {
 #[inline]
 pub fn partial_cmp<'a>(b1: &mut ReadBuffer<'a>, b2: &mut ReadBuffer<'a>) -> Option<Ordering> {
     let err = "partial_cmp err";
-    let t1 = b1.get_type().expect(err);
-    let t2 = b2.get_type().expect(err);
+    let t1 = b1.get_type_chunk().expect(err);
+    let t2 = b2.get_type_chunk().expect(err);
+
     // println!(
     //     "###########################t1:{:?}, t2:{:?}, b1.head:{}, b2.head:{}, b1:{:?}, b2:{:?}",
     //     t1, t2, b1.head, b2.head, &b1, &b2
@@ -1830,14 +1822,21 @@ pub fn partial_cmp<'a>(b1: &mut ReadBuffer<'a>, b2: &mut ReadBuffer<'a>) -> Opti
         }
         (3..8, 0..3) => {
             // b1是浮点数， b2是非数字， 并且b1的类型值大于b2的类型值，则认为b1更大
-            b1.head += base_type_len(b1, t1);
-            b1.head += 1;
+            let len1 = base_type_len(b1, t1);
+            b1.head += len1;
+            b2.head += 1;
+            b1.bytes.advance(len1);
+            b2.bytes.advance(1);
             Some(Ordering::Greater)
         }
         (3..8, _) => {
             // b1是浮点数， b2是非数字， 并且b1的类型值小于b2的类型值，则认为b1更小
-            b1.head += base_type_len(b1, t1);
-            b2.head += base_type_len(b2, t2);
+            let len1 = base_type_len(b1, t1);
+            b1.head += len1;
+            b1.bytes.advance(len1);
+            let len2 = base_type_len(b2, t2);
+            b2.head += len2;
+            b2.bytes.advance(len2);
             Some(Ordering::Less)
         }
         (9..42, 3..8) => {
@@ -1857,18 +1856,34 @@ pub fn partial_cmp<'a>(b1: &mut ReadBuffer<'a>, b2: &mut ReadBuffer<'a>) -> Opti
             // b1是整数, b2是整数
             if t1 > t2 {
                 //同是整数， 类型较大的，值也较大
-                b1.head += base_type_len(b1, t1);
-                b2.head += base_type_len(b2, t2);
+                let len1 = base_type_len(b1, t1);
+                let len2 = base_type_len(b2, t2);
+                b1.bytes.advance(len1);
+                b2.bytes.advance(len2);
+
+                b1.head += len1;
+                b2.head += len2;
+
                 return Some(Ordering::Greater);
             } else if t1 < t2 {
                 //同是整数， 类型较小的，值也较小
-                b1.head += base_type_len(b1, t1);
-                b2.head += base_type_len(b2, t2);
+                let len1 = base_type_len(b1, t1);
+                let len2 = base_type_len(b2, t2);
+                b1.bytes.advance(len1);
+                b2.bytes.advance(len2);
+
+                b1.head += len1;
+                b2.head += len2;
                 return Some(Ordering::Less);
             } else if t1 > 14 && t1 < 36 {
                 //同是整数且类型相等， 当类型值在15~35之间时，其表示的数值大小是确定的（-1~19）， 因此， b1与b2相等
-                b1.head += base_type_len(b1, t1);
-                b2.head += base_type_len(b2, t2);
+                let len1 = base_type_len(b1, t1);
+                let len2 = base_type_len(b2, t2);
+                b1.bytes.advance(len1);
+                b2.bytes.advance(len2);
+
+                b1.head += len1;
+                b2.head += len2;
                 return Some(Ordering::Equal);
             } else {
                 //同是整数且类型相等，但并不是常用数字（-1~19），需要读值进行比较
@@ -1877,20 +1892,31 @@ pub fn partial_cmp<'a>(b1: &mut ReadBuffer<'a>, b2: &mut ReadBuffer<'a>) -> Opti
         }
         (9..42, 0..3) => {
             //b1是整数， b2是非数字，并且b1的类型值更大，则b1更大
-            b1.head += base_type_len(b1, t1);
+            let len1 = base_type_len(b1, t1);
+            b1.bytes.advance(len1);
+            b2.bytes.advance(1);
+
+            b1.head += len1;
             b2.head += 1;
             Some(Ordering::Greater)
         }
         (9..42, _) => {
             //b1是整数， b2是非数字，并且b1的类型值更小，则b1更小
-            b1.head += base_type_len(b1, t1);
-            b2.head += base_type_len(b2, t2);
+            let len1 = base_type_len(b1, t1);
+            let len2 = base_type_len(b2, t2);
+            b1.bytes.advance(len1);
+            b2.bytes.advance(len2);
+            b1.head += len1;
+            b2.head += len2;
             Some(Ordering::Less)
         }
         (0..3, _) => {
             //b1是null, true或false， 理论上除了与自身相等， 无法与其他类型的值进行比较， 规定其大小与其类型值保持一致
             b1.head += 1;
-            b2.head += base_type_len(b2, t2);
+            b1.bytes.advance(1);
+            let len2 = base_type_len(b2, t2);
+            b2.head += len2;
+            b2.bytes.advance(len2);
             if t2 > t1 {
                 //t1小于3， t2大于t1,
                 return Some(Ordering::Less);
@@ -1904,34 +1930,54 @@ pub fn partial_cmp<'a>(b1: &mut ReadBuffer<'a>, b2: &mut ReadBuffer<'a>) -> Opti
             //b1是字符串
             if t2 > 110 {
                 //b1是字符串， b2是非字符串，且b1的类型值更小， 则b1更小
-                b1.head += base_type_len(b1, t1);
-                b2.head += base_type_len(b2, t2);
+                let len1 = base_type_len(b1, t1);
+                let len2 = base_type_len(b2, t2);
+                b1.bytes.advance(len1);
+                b2.bytes.advance(len2);
+
+                b1.head += len1;
+                b2.head += len2;
                 return Some(Ordering::Less);
             } else if t2 < 42 {
                 //b1是字符串， b2是非字符串，且b1的类型值更大， 则b1更大
-                b1.head += base_type_len(b1, t1);
-                b2.head += base_type_len(b2, t2);
+                let len1 = base_type_len(b1, t1);
+                let len2 = base_type_len(b2, t2);
+                b1.bytes.advance(len1);
+                b2.bytes.advance(len2);
+
+                b1.head += len1;
+                b2.head += len2;
                 return Some(Ordering::Greater);
             } else {
                 //b1是字符串， b2也是字符串，需要读值比较字符串的二进制数据的大小
-                return compare_str(b1, b2, t1, t2);
+                return compare_str(b1, b2);
             }
         }
         (111..180, _) => {
             // b1是二进制
             if t2 > 179 {
                 // b1是二进制， b2是非二进制，且b1的类型值更小， 则b1更小
-                b1.head += base_type_len(b1, t1);
-                b2.head += base_type_len(b2, t2);
+                let len1 = base_type_len(b1, t1);
+                let len2 = base_type_len(b2, t2);
+                b1.bytes.advance(len1);
+                b2.bytes.advance(len2);
+
+                b1.head += len1;
+                b2.head += len2;
                 return Some(Ordering::Less);
             } else if t2 < 111 {
                 // b1是二进制， b2是非二进制，且b1的类型值更大， 则b1更大
-                b1.head += base_type_len(b1, t1);
-                b2.head += base_type_len(b2, t2);
+                let len1 = base_type_len(b1, t1);
+                let len2 = base_type_len(b2, t2);
+                b1.bytes.advance(len1);
+                b2.bytes.advance(len2);
+
+                b1.head += len1;
+                b2.head += len2;
                 return Some(Ordering::Greater);
             } else {
                 // b1是二进制， b2也是二进制，需要读值比二进制数据的大小
-                return compare_bin(b1, b2, t1, t2);
+                return compare_bin(b1, b2);
             }
         }
         (_, 0) => {
@@ -1950,12 +1996,17 @@ pub fn partial_cmp<'a>(b1: &mut ReadBuffer<'a>, b2: &mut ReadBuffer<'a>) -> Opti
             // b1是容器， b2也是二进制，需要读值比二进制数据的大小
             if t2 < 180 {
                 // b1是容器， b2是非容器，b1的类型值更大， 则b1更大
-                b1.head += base_type_len(b1, t1);
-                b2.head += base_type_len(b2, t2);
+                let len1 = base_type_len(b1, t1);
+                let len2 = base_type_len(b2, t2);
+                b1.bytes.advance(len1);
+                b2.bytes.advance(len2);
+
+                b1.head += len1;
+                b2.head += len2;
                 return Some(Ordering::Greater);
             } else {
                 // b1是容器， b2也是容器，需要读值比容器二进制数据的大小
-                return compare_contain(b1, b2, t1, t2);
+                return compare_contain(b1, b2);
             }
         }
     }
@@ -1966,15 +2017,17 @@ fn to_bigint<'a>(bb: &mut ReadBuffer<'a>) -> BigInt {
     let mut n = BigInt::from(0);
     let mut c = BigInt::from(4294967296 as i64);
     bb.head += 1;
+    bb.bytes.advance(1);
     for _ in 0..=7 {
         bb.head += 4;
-        n += BigInt::from_bytes_le(Sign::Plus, &bb.bytes[bb.head - 4..bb.head]);
+        // n += BigInt::from_bytes_le(Sign::Plus, &bb.bytes[bb.head - 4..bb.head]);
+        n += BigInt::from_bytes_le(Sign::Plus, &bb.bytes.copy_to_bytes(4));
         base *= &c;
     }
     n
 }
 
-pub fn base_type_len(bb: &ReadBuffer, t: u8) -> usize {
+pub fn base_type_len(bb: &mut ReadBuffer, t: u8) -> usize {
     match t {
         0..5 | 15..36 => 1,
         5 => {
@@ -1991,11 +2044,12 @@ pub fn base_type_len(bb: &ReadBuffer, t: u8) -> usize {
         12 | 39 => 7,
         13 | 40 => 9,
         14 | 41 => 17,
-        42..107 | 111..176 => (t - 42) as usize + 1,
-        107 | 176 => bb.bytes.get_u8(bb.head + 1) as usize + 2,
-        108 | 177 => bb.bytes.get_lu16(bb.head + 1) as usize + 3,
-        109 | 178 => bb.bytes.get_lu32(bb.head + 1) as usize + 5,
-        110 | 179 => bb.bytes.get_lu32(bb.head + 1) as usize + 7,
+        42..107 => (t - 42) as usize + 1,
+        111..176 => (t - 111) as usize + 1,
+        107 | 176 => bb.bytes.get_u8() as usize + 1,
+        108 | 177 => bb.bytes.get_u16_le() as usize + 1,
+        109 | 178 => bb.bytes.get_u32_le() as usize + 1,
+        110 | 179 => bb.bytes.get_u32_le() as usize + 3,
         249 | 250 => 32,
         _ => {
             panic!("other type TODO base_type_len type:{:?}", t);
@@ -2010,15 +2064,18 @@ fn compare_number<'a>(rb: &mut ReadBuffer<'a>, v1: f64, t2: u8) -> Option<Orderi
         9..14 => rb.read_i64().expect(err) as f64,
         14 => {
             rb.head += 17;
+            rb.bytes.advance(17);
             return Some(Ordering::Greater);
         }
         15 => {
             rb.head += 1;
+            rb.bytes.advance(1);
             -1.0
         }
         16..41 => rb.read_u64().expect(err) as f64,
         41 => {
             rb.head += 17;
+            rb.bytes.advance(17);
             return Some(Ordering::Less);
         }
         _ => panic!("t2 is not number:{}", t2),
@@ -2056,32 +2113,28 @@ fn compare_int<'a>(rb1: &mut ReadBuffer<'a>, rb2: &mut ReadBuffer<'a>, t: u8) ->
     }
 }
 
-fn compare_str<'a>(
-    rb1: &mut ReadBuffer<'a>,
-    rb2: &mut ReadBuffer<'a>,
-    t1: u8,
-    t2: u8,
-) -> Option<Ordering> {
+fn compare_str<'a>(rb1: &mut ReadBuffer<'a>, rb2: &mut ReadBuffer<'a>) -> Option<Ordering> {
     rb1.head += 1;
     rb2.head += 1;
+    let t1 = rb1.get_type().unwrap();
+    let t2 = rb2.get_type().unwrap();
     let len1 = match t1 {
         42..107 => (t1 - 42) as usize,
         107 => {
             rb1.head += 1;
-            rb1.bytes.get_u8(rb1.head - 1) as usize
+            rb1.bytes.get_u8() as usize
         }
         108 => {
             rb1.head += 2;
-            rb1.bytes.get_lu16(rb1.head - 2) as usize
+            rb1.bytes.get_u16_le() as usize
         }
         109 => {
             rb1.head += 4;
-            rb1.bytes.get_lu32(rb1.head - 4) as usize
+            rb1.bytes.get_u32_le() as usize
         }
         110 => {
             rb1.head += 6;
-            rb1.bytes.get_lu16(rb1.head - 6) as usize
-                + (rb1.bytes.get_lu32(rb1.head - 4) * 0x10000) as usize
+            rb1.bytes.get_u16_le() as usize + (rb1.bytes.get_u32_le() * 0x10000) as usize
         }
         _ => {
             panic!("t1 is not str:{}", t1);
@@ -2092,20 +2145,19 @@ fn compare_str<'a>(
         42..107 => (t2 - 42) as usize,
         107 => {
             rb2.head += 1;
-            rb2.bytes.get_u8(rb2.head - 1) as usize
+            rb2.bytes.get_u8() as usize
         }
         108 => {
             rb2.head += 2;
-            rb2.bytes.get_lu16(rb2.head - 2) as usize
+            rb2.bytes.get_u16_le() as usize
         }
         109 => {
             rb2.head += 4;
-            rb2.bytes.get_lu32(rb2.head - 4) as usize
+            rb2.bytes.get_u32_le() as usize
         }
         110 => {
             rb2.head += 6;
-            rb2.bytes.get_lu16(rb2.head - 6) as usize
-                + (rb2.bytes.get_lu32(rb2.head - 4) * 0x10000) as usize
+            rb2.bytes.get_u16_le() as usize + (rb2.bytes.get_u32_le() * 0x10000) as usize
         }
         _ => {
             panic!("t2 is not str:{}", t2);
@@ -2118,36 +2170,35 @@ fn compare_str<'a>(
     // println!("{:?}, {:?}", &rb1.bytes[rb1.head - len1..rb1.head], &rb2.bytes[rb2.head - len2..rb2.head]);
     // println!("rb1 start = {:?}, rb1 end = {:?}, rb1 = {:?}", rb1.head - len1, rb1.head, rb1.bytes);
     // println!("rb2 start = {:?}, rb2 end = {:?}, rb2 = {:?}", rb2.head - len2, rb2.head, rb2.bytes);
+    let dst1 = rb1.bytes.copy_to_bytes(len1);
+    let dst2 = rb2.bytes.copy_to_bytes(len2);
 
-    rb1.bytes[rb1.head - len1..rb1.head].partial_cmp(&rb2.bytes[rb2.head - len2..rb2.head])
+    // rb1.bytes[rb1.head - len1..rb1.head].partial_cmp(&rb2.bytes[rb2.head - len2..rb2.head])
+    dst1.partial_cmp(&dst2)
 }
 
-fn compare_bin<'a>(
-    rb1: &mut ReadBuffer<'a>,
-    rb2: &mut ReadBuffer<'a>,
-    t1: u8,
-    t2: u8,
-) -> Option<Ordering> {
+fn compare_bin<'a>(rb1: &mut ReadBuffer<'a>, rb2: &mut ReadBuffer<'a>) -> Option<Ordering> {
     rb1.head += 1;
     rb2.head += 1;
+    let t1 = rb1.get_type().unwrap();
+    let t2 = rb2.get_type().unwrap();
     let len1 = match t1 {
         111..176 => (t1 - 111) as usize,
         176 => {
             rb1.head += 1;
-            rb1.bytes.get_u8(rb1.head - 1) as usize
+            rb1.bytes.get_u8() as usize
         }
         177 => {
             rb1.head += 2;
-            rb1.bytes.get_lu16(rb1.head - 2) as usize
+            rb1.bytes.get_u16_le() as usize
         }
         178 => {
             rb1.head += 4;
-            rb1.bytes.get_lu32(rb1.head - 4) as usize
+            rb1.bytes.get_u32_le() as usize
         }
         179 => {
             rb1.head += 6;
-            rb1.bytes.get_lu16(rb1.head - 6) as usize
-                + (rb1.bytes.get_lu32(rb1.head - 4) * 0x10000) as usize
+            rb1.bytes.get_u16_le() as usize + (rb1.bytes.get_u32_le() * 0x10000) as usize
         }
         _ => {
             panic!("t1 is not bin:{}", t1);
@@ -2158,20 +2209,19 @@ fn compare_bin<'a>(
         111..176 => (t2 - 111) as usize,
         176 => {
             rb2.head += 1;
-            rb2.bytes.get_u8(rb2.head - 1) as usize
+            rb2.bytes.get_u8() as usize
         }
         177 => {
             rb2.head += 2;
-            rb2.bytes.get_lu16(rb2.head - 2) as usize
+            rb2.bytes.get_u16_le() as usize
         }
         178 => {
             rb2.head += 4;
-            rb2.bytes.get_lu32(rb2.head - 4) as usize
+            rb2.bytes.get_u32_le() as usize
         }
         179 => {
             rb2.head += 6;
-            rb2.bytes.get_lu16(rb2.head - 6) as usize
-                + (rb2.bytes.get_lu32(rb2.head - 4) * 0x10000) as usize
+            rb2.bytes.get_u16_le() as usize + (rb2.bytes.get_u32_le() * 0x10000) as usize
         }
         _ => {
             panic!("t2 is not bin:{}", t2);
@@ -2181,35 +2231,35 @@ fn compare_bin<'a>(
     rb1.head += len1;
     rb2.head += len2;
 
-    rb1.bytes[rb1.head - len1..rb1.head].partial_cmp(&rb2.bytes[rb2.head - len2..rb2.head])
+    let dst1 = rb1.bytes.copy_to_bytes(len1);
+    let dst2 = rb2.bytes.copy_to_bytes(len2);
+
+    dst1.partial_cmp(&dst2)
+    // rb1.bytes[rb1.head - len1..rb1.head].partial_cmp(&rb2.bytes[rb2.head - len2..rb2.head])
 }
 
-fn compare_contain<'a>(
-    rb1: &mut ReadBuffer<'a>,
-    rb2: &mut ReadBuffer<'a>,
-    t1: u8,
-    t2: u8,
-) -> Option<Ordering> {
+fn compare_contain<'a>(rb1: &mut ReadBuffer<'a>, rb2: &mut ReadBuffer<'a>) -> Option<Ordering> {
+    let t1 = rb1.get_type().unwrap();
+    let t2 = rb2.get_type().unwrap();
     rb1.head += 1;
     rb2.head += 1;
     match t1 {
         180..245 => (t1 - 180) as usize,
         245 => {
             rb1.head += 1;
-            rb1.bytes.get_u8(rb1.head - 1) as usize
+            rb1.bytes.get_u8() as usize
         }
         246 => {
             rb1.head += 2;
-            rb1.bytes.get_lu16(rb1.head - 2) as usize
+            rb1.bytes.get_u16_le() as usize
         }
         247 => {
             rb1.head += 4;
-            rb1.bytes.get_lu32(rb1.head - 4) as usize
+            rb1.bytes.get_u32_le() as usize
         }
         248 => {
             rb1.head += 6;
-            rb1.bytes.get_lu16(rb1.head - 6) as usize
-                + (rb1.bytes.get_lu32(rb1.head - 4) * 0x10000) as usize
+            rb1.bytes.get_u16_le() as usize + (rb1.bytes.get_u32_le() * 0x10000) as usize
         }
         _ => {
             panic!("it is not contain");
@@ -2220,20 +2270,19 @@ fn compare_contain<'a>(
         180..245 => (t2 - 180) as usize,
         245 => {
             rb2.head += 1;
-            rb2.bytes.get_u8(rb2.head - 1) as usize
+            rb2.bytes.get_u8() as usize
         }
         246 => {
             rb2.head += 2;
-            rb2.bytes.get_lu16(rb2.head - 2) as usize
+            rb2.bytes.get_u16_le() as usize
         }
         247 => {
             rb2.head += 4;
-            rb2.bytes.get_lu32(rb2.head - 4) as usize
+            rb2.bytes.get_u32_le() as usize
         }
         248 => {
             rb2.head += 6;
-            rb2.bytes.get_lu16(rb2.head - 6) as usize
-                + (rb2.bytes.get_lu32(rb2.head - 4) * 0x10000) as usize
+            rb2.bytes.get_u16_le() as usize + (rb2.bytes.get_u32_le() * 0x10000) as usize
         }
         _ => {
             panic!("it is not contain");
@@ -2292,6 +2341,19 @@ pub struct StructValue {
 pub struct FieldValue {
     pub name: String,
     pub fvalue: EnumValue,
+}
+
+fn move_part(bytes: &mut Vec<u8>, range: Range<usize>, offset: usize) {
+    unsafe {
+        let len = bytes.len();
+        let dl = range.end - range.start;
+        if len < offset + dl {
+            bytes.set_len(offset + dl);
+        }
+        let src = bytes.as_mut_ptr();
+        src.wrapping_offset(range.start as isize)
+            .copy_to(src.wrapping_offset(offset as isize), dl)
+    }
 }
 
 #[cfg(test)]
@@ -2410,7 +2472,6 @@ mod tests {
         buf18.write_bin(&[5; 10], 0..10);
         buf19.write_bin(&[6; 5], 0..5);
         buf20.write_bin(&[6; 5], 0..5);
-
         let read_buf1 = ReadBuffer::new(buf1.get_byte(), 0);
         let read_buf2 = ReadBuffer::new(buf2.get_byte(), 0);
         let read_buf3 = ReadBuffer::new(buf3.get_byte(), 0);
@@ -2456,7 +2517,6 @@ mod tests {
         assert_eq!(read_buf15 < read_buf18, true); //测试 "abcdefg", &[5;10]
         assert_eq!(read_buf18 < read_buf19, true); //测试 &[5;10], &[6;5]
         assert_eq!(read_buf19 == read_buf20, true); //测试 &[6;5], &[6;5]
-
         let mut buf1 = WriteBuffer::with_bytes(Vec::new(), 0);
         buf1.write_nil(); //null
         buf1.write_bool(false); //false
@@ -2466,7 +2526,6 @@ mod tests {
         buf1.write_f32(5.0); //1.0
         buf1.write_u8(5);
         buf1.write_utf8("abc");
-
         let mut buf2 = WriteBuffer::with_bytes(Vec::new(), 0);
         buf2.write_utf8("acc");
         buf2.write_u8(5);
