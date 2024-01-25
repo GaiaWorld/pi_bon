@@ -1806,7 +1806,7 @@ pub fn partial_cmp<'a>(b1: &mut ReadBuffer<'a>, b2: &mut ReadBuffer<'a>) -> Opti
     let err = "partial_cmp err";
     let t1 = b1.get_type_chunk().expect(err);
     let t2 = b2.get_type_chunk().expect(err);
-
+    // println!("partial_cmp  b1:{:?}, b2:{:?}", b1.bytes, b2.bytes);
     // println!(
     //     "###########################t1:{:?}, t2:{:?}, b1.head:{}, b2.head:{}, b1:{:?}, b2:{:?}",
     //     t1, t2, b1.head, b2.head, &b1, &b2
@@ -2046,10 +2046,22 @@ pub fn base_type_len(bb: &mut ReadBuffer, t: u8) -> usize {
         14 | 41 => 17,
         42..107 => (t - 42) as usize + 1,
         111..176 => (t - 111) as usize + 1,
-        107 | 176 => bb.bytes.get_u8() as usize + 1,
-        108 | 177 => bb.bytes.get_u16_le() as usize + 1,
-        109 | 178 => bb.bytes.get_u32_le() as usize + 1,
-        110 | 179 => bb.bytes.get_u32_le() as usize + 3,
+        107 | 176 => {
+            bb.bytes.advance(1);
+            bb.bytes.get_u8() as usize
+        }
+        108 | 177 => {
+            bb.bytes.advance(1);
+            bb.bytes.get_u16_le() as usize
+        }
+        109 | 178 => {
+            bb.bytes.advance(1);
+            bb.bytes.get_u32_le() as usize
+        }
+        110 | 179 => {
+            bb.bytes.advance(1);
+            bb.bytes.get_u32_le() as usize + 2
+        }
         249 | 250 => 32,
         _ => {
             panic!("other type TODO base_type_len type:{:?}", t);
