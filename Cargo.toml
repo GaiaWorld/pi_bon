@@ -1,6 +1,6 @@
 [package]
 name = "pi_bon"
-version = "0.2.3"
+version = "0.2.4"
 authors = ["suncy <530739162@qq.com>"]
 edition = "2021"
 description = "attempt to downcast the triat object to a concrete type"
@@ -12,6 +12,7 @@ keywords = ["pi", "pi_bon", "serialize"]
 # pi_data_view = "0.1"
 bytes = "1.5"
 num-bigint = "0.4"
+log = "0.4"
 
 [dev-dependencies]
 rand = "0.8"

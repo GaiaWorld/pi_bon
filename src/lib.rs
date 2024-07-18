@@ -82,6 +82,7 @@ pub enum ReadBonErr {
         head: usize,
     },
     Other(String),
+    IsContainer(u8),
 }
 
 impl fmt::Display for ReadBonErr {
@@ -102,6 +103,7 @@ impl fmt::Display for ReadBonErr {
                 try_read, act_type, head
             ),
             ReadBonErr::Other(s) => write!(f, "ReadBonError Other other = {:?}", s),
+            ReadBonErr::IsContainer(_) => write!(f, "IsContainer!"),
         }
     }
 }
@@ -109,6 +111,7 @@ impl fmt::Display for ReadBonErr {
 impl Error for ReadBonErr {}
 
 impl ReadBonErr {
+    #[inline]
     fn overflow(try_index: usize, len: usize) -> ReadBonErr {
         ReadBonErr::Overflow {
             try_index: try_index,
@@ -221,28 +224,33 @@ impl<'a> ReadBuffer<'a> {
     }
 
     /// 获取ReadBuffer当前的读指针（读是从头部开始，即下一次调用read方法，将从self.head位置向后反序列化）
+    #[inline]
     pub fn head(&self) -> usize {
         self.head
     }
 
     /// 二进制的长度
+    #[inline]
     pub fn len(&self) -> usize {
         self.bytes.len()
     }
 
     /// 获取接下来要反序列化的数据的类型
+    #[inline]
     pub fn get_type(&mut self) -> Result<u8, ReadBonErr> {
         self.probe_border(1)?;
         Ok(self.bytes.get_u8())
     }
 
     /// 获取接下来要反序列化的数据的类型(不改变bytes偏移)
+    #[inline]
     pub fn get_type_chunk(&mut self) -> Result<u8, ReadBonErr> {
         self.probe_border(1)?;
         Ok(self.bytes.chunk()[0])
     }
 
     /// 读一个布尔类型，如果二进制当前的值不是布尔类型，返回Err
+    #[inline]
     pub fn read_bool(&mut self) -> Result<bool, ReadBonErr> {
         self.probe_border(1)?;
         let t = self.bytes.get_u8();
@@ -259,72 +267,85 @@ impl<'a> ReadBuffer<'a> {
     }
 
     /// 读一个u8类型，如果二进制当前的值不是u8类型，返回Err
+    #[inline]
     pub fn read_u8(&mut self) -> Result<u8, ReadBonErr> {
         let r = self.read_integer::<u32>()?;
         Ok(r as u8)
     }
 
     /// 读一个u16类型，如果二进制当前的值不是u16类型，返回Err
+    #[inline]
     pub fn read_u16(&mut self) -> Result<u16, ReadBonErr> {
         let r = self.read_integer::<u32>()?;
         Ok(r as u16)
     }
 
     /// 读一个u32类型，如果二进制当前的值不是u32类型，返回Err
+    #[inline]
     pub fn read_u32(&mut self) -> Result<u32, ReadBonErr> {
         self.read_integer::<u32>()
     }
 
     /// 读一个u64类型，如果二进制当前的值不是u64类型，返回Err
+    #[inline]
     pub fn read_u64(&mut self) -> Result<u64, ReadBonErr> {
         self.read_integer::<u64>()
     }
 
     /// 读一个usize类型，如果二进制当前的值不是usize类型，返回Err
+    #[inline]
     pub fn read_usize(&mut self) -> Result<usize, ReadBonErr> {
         let r = self.read_integer::<u64>()?;
         Ok(r as usize)
     }
 
     /// 读一个u128类型，如果二进制当前的值不是u128类型，返回Err
+    #[inline]
     pub fn read_u128(&mut self) -> Result<u128, ReadBonErr> {
         self.read_integer::<u128>()
     }
 
     /// 读一个i8类型，如果二进制当前的值不是i8类型，返回Err
+    #[inline]
     pub fn read_i8(&mut self) -> Result<i8, ReadBonErr> {
         let r = self.read_integer::<i32>()?;
         Ok(r as i8)
     }
 
     /// 读一个i16类型，如果二进制当前的值不是i16类型，返回Err
+    #[inline]
     pub fn read_i16(&mut self) -> Result<i16, ReadBonErr> {
         let r = self.read_integer::<i32>()?;
         Ok(r as i16)
     }
 
     /// 读一个ui32类型，如果二进制当前的值不是i32类型，返回Err
+    #[inline]
     pub fn read_i32(&mut self) -> Result<i32, ReadBonErr> {
         self.read_integer::<i32>()
     }
 
     /// 读一个i61类型，如果二进制当前的值不是i64类型，返回Err
+    #[inline]
     pub fn read_i64(&mut self) -> Result<i64, ReadBonErr> {
         self.read_integer::<i64>()
     }
 
     /// 读一个isize类型，如果二进制当前的值不是isize类型，返回Err
+    #[inline]
     pub fn read_isize(&mut self) -> Result<isize, ReadBonErr> {
         let r = self.read_integer::<i64>()?;
         Ok(r as isize)
     }
 
     /// 读一个i128类型，如果二进制当前的值不是i128类型，返回Err
+    #[inline]
     pub fn read_i128(&mut self) -> Result<i128, ReadBonErr> {
         self.read_integer::<i128>()
     }
 
     /// 读一个f32类型，如果二进制当前的值不是f32类型，返回Err
+    #[inline]
     pub fn read_f32(&mut self) -> Result<f32, ReadBonErr> {
         self.probe_border(1)?;
         let t = self.bytes.get_u8();
@@ -384,6 +405,7 @@ impl<'a> ReadBuffer<'a> {
     }
 
     /// 读出一个动态长度，正整数，不允许大于0x20000000
+    #[inline]
     pub fn read_lengthen(&mut self) -> Result<u32, ReadBonErr> {
         self.probe_border(1)?;
         // let t = self.bytes.get_u8();
@@ -408,10 +430,16 @@ impl<'a> ReadBuffer<'a> {
     }
 
     // 读一个二进制类型，如果二进制当前的值不是二进制类型，返回Err
+    #[inline]
     pub fn read_bin(&mut self) -> Result<Vec<u8>, ReadBonErr> {
         self.probe_border(1)?;
         let t = self.bytes.get_u8();
         self.head += 1;
+        
+       self.read_bin_inner(t)
+    }
+
+    fn read_bin_inner(&mut self, t: u8)-> Result<Vec<u8>, ReadBonErr>{
         let len: usize;
         if t >= 111 && t <= 175 {
             len = (t as usize) - 111;
@@ -450,10 +478,15 @@ impl<'a> ReadBuffer<'a> {
     }
 
     /// 读一个utf8编码的字符串类型，如果二进制当前的值不是utf8编码的字符串类型类型，返回Err
+    #[inline]
     pub fn read_utf8(&mut self) -> Result<String, ReadBonErr> {
         self.probe_border(1)?;
         let t = self.bytes.get_u8();
         self.head += 1;
+        self.read_utf8_inner(t)
+    }
+
+    fn read_utf8_inner(&mut self, t: u8) -> Result<String, ReadBonErr> {
         let len: usize;
         if t >= 42 && t <= 106 {
             len = t as usize - 42;
@@ -536,6 +569,7 @@ impl<'a> ReadBuffer<'a> {
     }
 
     /// 下一个值是否为None
+    #[inline]
     pub fn is_nil(&mut self) -> Result<bool, ReadBonErr> {
         self.probe_border(1)?;
         // let first = self.bytes.get_u8();
@@ -575,7 +609,7 @@ impl<'a> ReadBuffer<'a> {
                 panic!("128 bit floating-point number temporarily unsupported");
             }
             15 => Ok(EnumValue::I8(-1)),
-            16..36 => Ok(EnumValue::U8(first - 10)),
+            16..36 => Ok(EnumValue::U8(first - 16)),
             36 => {
                 self.head += 1;
                 Ok(EnumValue::U8(self.bytes.get_u8()))
@@ -629,12 +663,13 @@ impl<'a> ReadBuffer<'a> {
                 Ok(EnumValue::I128(-(self.bytes.get_u128_le() as i128)))
             }
             42..111 => {
-                self.head -= 1;
-                Ok(EnumValue::Str(self.read_utf8()?))
+                self.read_utf8_inner(first).map(|op|EnumValue::Str(op))
             }
             111..180 => {
-                self.head -= 1;
-                Ok(EnumValue::Bin(self.read_bin()?))
+                self.read_bin_inner(first).map(|op|EnumValue::Bin(op))
+            }
+            245..249 => {
+                return Err(ReadBonErr::IsContainer(first));
             }
             _ => {
                 panic!("other type TODO ReadBuffer::read");
@@ -709,7 +744,7 @@ impl<'a> ReadBuffer<'a> {
                     Ok(T::from(self.bytes.get_u128_le() as u128))
                 }
                 _ => {
-                    println!("read integer error, act_type: {}, bin: {:?}", t, self.bytes);
+                    log::error!("read integer error, act_type: {}, bin: {:?}", t, self.bytes);
                     Err(ReadBonErr::type_no_match(
                         "integer".to_string(),
                         t,
@@ -1801,7 +1836,7 @@ impl<T: Decode> Decode for Option<T> {
     }
 }
 
-#[inline]
+
 pub fn partial_cmp<'a>(b1: &mut ReadBuffer<'a>, b2: &mut ReadBuffer<'a>) -> Option<Ordering> {
     let err = "partial_cmp err";
     let t1 = b1.get_type_chunk().expect(err);
@@ -2323,6 +2358,7 @@ pub enum EnumType {
     Map(u32, u64),
     Struct(u64),
 }
+#[derive(Debug)]
 pub enum EnumValue {
     Void,
     Bool(bool),
@@ -2345,11 +2381,13 @@ pub enum EnumValue {
     Struct(Arc<StructValue>),
 }
 
+#[derive(Debug)]
 pub struct StructValue {
     pub hash: u32,
     pub fields: Vec<FieldValue>,
 }
 
+#[derive(Debug)]
 pub struct FieldValue {
     pub name: String,
     pub fvalue: EnumValue,
