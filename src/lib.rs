@@ -624,8 +624,8 @@ impl<'a> ReadBuffer<'a> {
             }
             39 => {
                 self.head += 6;
-                Ok(EnumValue::U64(
-                    self.bytes.get_u16_le() as u64 + ((self.bytes.get_u32_le() as u64) << 16),
+                Ok(EnumValue::F64(
+                    (self.bytes.get_u16_le() as u64 + ((self.bytes.get_u32_le() as u64) << 16)) as f64,
                 ))
             }
             40 => {
@@ -650,8 +650,8 @@ impl<'a> ReadBuffer<'a> {
             }
             12 => {
                 self.head += 6;
-                Ok(EnumValue::I64(
-                    -(self.bytes.get_u16_le() as i64) - ((self.bytes.get_u32_le() as i64) << 16),
+                Ok(EnumValue::F64(
+                    (-(self.bytes.get_u16_le() as i64) - ((self.bytes.get_u32_le() as i64) << 16)) as f64,
                 ))
             }
             13 => {
