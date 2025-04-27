@@ -180,14 +180,15 @@ impl<'a> PartialOrd for ReadBuffer<'a> {
 
         loop {
             match partial_cmp(&mut b1, &mut b2) {
-                None => return None,
-                Some(Ordering::Equal) => {
+                Ok(None) => return None,
+                Ok(Some(Ordering::Equal)) => {
                     if b1.len() == 0 {
                         return Some(Ordering::Equal);
                     }
                 }
-                Some(Ordering::Greater) => return Some(Ordering::Greater),
-                Some(Ordering::Less) => return Some(Ordering::Less),
+                Ok(Some(Ordering::Greater)) => return Some(Ordering::Greater),
+                Ok(Some(Ordering::Less)) => return Some(Ordering::Less),
+                Err(_e) => return None,
             }
         }
     }
@@ -594,9 +595,7 @@ impl<'a> ReadBuffer<'a> {
             2 => Ok(EnumValue::Bool(true)),
             3 => Ok(EnumValue::F32(0.0)),
             4 => Ok(EnumValue::F32(1.0)),
-            5 => {
-                panic!("16 bit floating-point number temporarily unsupported");
-            }
+            5 => Err(ReadBonErr::other("16-bit float unsupported".to_string())),
             6 => {
                 self.head += 4;
                 Ok(EnumValue::F32(self.bytes.get_f32_le()))
@@ -605,9 +604,7 @@ impl<'a> ReadBuffer<'a> {
                 self.head += 8;
                 Ok(EnumValue::F64(self.bytes.get_f64_le()))
             }
-            8 => {
-                panic!("128 bit floating-point number temporarily unsupported");
-            }
+            8 => Err(ReadBonErr::other("128-bit float unsupported".to_string())),
             15 => Ok(EnumValue::I8(-1)),
             16..36 => Ok(EnumValue::U8(first - 16)),
             36 => {
@@ -671,9 +668,7 @@ impl<'a> ReadBuffer<'a> {
             245..249 => {
                 return Err(ReadBonErr::IsContainer(first));
             }
-            _ => {
-                panic!("other type TODO ReadBuffer::read");
-            }
+            _ => Err(ReadBonErr::other(format!("Unexpected type: {}", first))),
         }
     }
 
@@ -964,7 +959,7 @@ impl WriteBuffer {
     /// * 1字节： 0xxxxxxx
     /// * 2字节： 10xxxxxx xxxxxxxx
     /// * 4字节： 110xxxxx xxxxxxxx xxxxxxxx xxxxxxxx
-    pub fn write_lengthen(&mut self, t: u32) {
+    pub fn write_lengthen(&mut self, t: u32)-> Result<(), ReadBonErr> {
         if t < 0x80 {
             self.try_extend_capity(1);
             self.bytes.put_u8(t as u8);
@@ -978,8 +973,9 @@ impl WriteBuffer {
             self.bytes.put_u32_ne((0xC0000000 + t) as u32);
             self.tail += 4;
         } else {
-            panic!("invalid lengthen, it's {}", t);
+            return Err(ReadBonErr::other(format!("Invalid lengthen: {}", t)));
         }
+        Ok(())
     }
 
     ///写字符串
@@ -993,9 +989,9 @@ impl WriteBuffer {
     }
 
     /// 写容器。容器有数组，map，枚举，struct
-    pub fn write_container<T, F>(&mut self, o: &T, write_next: F, estimated_size: Option<usize>)
+    pub fn write_container<T, F>(&mut self, o: &T, write_next: F, estimated_size: Option<usize>) -> Result<(), ReadBonErr>
     where
-        F: Fn(&mut WriteBuffer, &T),
+        F: Fn(&mut WriteBuffer, &T) -> Result<(), ReadBonErr>,
     {
         let t = self.bytes.len();
         let len_bytes: usize; //描述容器长度的值的字节数
@@ -1033,7 +1029,7 @@ impl WriteBuffer {
             limit_size = 0xffffffffffffffff;
         }
         let tt = self.tail;
-        write_next(self, o);
+        write_next(self, o)?;
         let len = (self.tail - tt) as u64;
         // 判断实际写入的大小超出预期的大小，需要移动数据
         if limit_size < len && len > 64 {
@@ -1066,10 +1062,12 @@ impl WriteBuffer {
         match limit_size {
             64 => {
                 self.bytes.put_u8((180 + len) as u8);
+                Ok(())
             }
             0xff => {
                 self.bytes.put_u8(245);
                 self.bytes.put_u8(len as u8);
+                Ok(())
             }
             0xffff => {
                 let mut v: Vec<u8> = Vec::with_capacity(1 + 2 + self.bytes.len());
@@ -1077,6 +1075,7 @@ impl WriteBuffer {
                 v.put_u16_le(len as u16);
                 v.extend_from_slice(&self.bytes);
                 std::mem::replace(&mut self.bytes, v);
+                Ok(())
             }
             0xffffffff => {
                 let mut v: Vec<u8> = Vec::with_capacity(1 + 4 + self.bytes.len());
@@ -1084,6 +1083,7 @@ impl WriteBuffer {
                 v.put_u32_le(len as u32);
                 v.extend_from_slice(&self.bytes);
                 std::mem::replace(&mut self.bytes, v);
+                Ok(())
             }
             0xffffffffffff => {
                 let mut v: Vec<u8> = Vec::with_capacity(1 + 6 + self.bytes.len());
@@ -1091,11 +1091,10 @@ impl WriteBuffer {
                 v.put_u16_le((len & 0xffff) as u16);
                 v.put_u32_le((len >> 16) as u32);
                 std::mem::replace(&mut self.bytes, v);
+                Ok(())
             }
 
-            _ => {
-                panic!("container overflow");
-            }
+            _ => return Err(ReadBonErr::other("Container overflow".to_string())),
         }
     }
 
@@ -1837,7 +1836,7 @@ impl<T: Decode> Decode for Option<T> {
 }
 
 
-pub fn partial_cmp<'a>(b1: &mut ReadBuffer<'a>, b2: &mut ReadBuffer<'a>) -> Option<Ordering> {
+pub fn partial_cmp<'a>(b1: &mut ReadBuffer<'a>, b2: &mut ReadBuffer<'a>) -> Result<Option<Ordering>, ReadBonErr> {
     let err = "partial_cmp err";
     let t1 = b1.get_type_chunk().expect(err);
     let t2 = b2.get_type_chunk().expect(err);
@@ -1853,7 +1852,7 @@ pub fn partial_cmp<'a>(b1: &mut ReadBuffer<'a>, b2: &mut ReadBuffer<'a>) -> Opti
                 true => b1.read_f32().expect(err) as f64,
                 false => b1.read_f64().expect(err),
             };
-            compare_number(b2, v1, t2)
+            Ok(compare_number(b2, v1, t2))
         }
         (3..8, 0..3) => {
             // b1是浮点数， b2是非数字， 并且b1的类型值大于b2的类型值，则认为b1更大
@@ -1862,7 +1861,7 @@ pub fn partial_cmp<'a>(b1: &mut ReadBuffer<'a>, b2: &mut ReadBuffer<'a>) -> Opti
             b2.head += 1;
             b1.bytes.advance(len1);
             b2.bytes.advance(1);
-            Some(Ordering::Greater)
+            Ok(Some(Ordering::Greater))
         }
         (3..8, _) => {
             // b1是浮点数， b2是非数字， 并且b1的类型值小于b2的类型值，则认为b1更小
@@ -1872,7 +1871,7 @@ pub fn partial_cmp<'a>(b1: &mut ReadBuffer<'a>, b2: &mut ReadBuffer<'a>) -> Opti
             let len2 = base_type_len(b2, t2);
             b2.head += len2;
             b2.bytes.advance(len2);
-            Some(Ordering::Less)
+            Ok(Some(Ordering::Less))
         }
         (9..42, 3..8) => {
             // b1是整数， b2是浮点数，需要读取比较对象的值进行比较
@@ -1881,10 +1880,10 @@ pub fn partial_cmp<'a>(b1: &mut ReadBuffer<'a>, b2: &mut ReadBuffer<'a>) -> Opti
                 false => b2.read_f64().expect(err),
             };
             match compare_number(b1, v2, t1) {
-                Some(Ordering::Less) => Some(Ordering::Greater),
-                Some(Ordering::Greater) => Some(Ordering::Less),
-                Some(Ordering::Equal) => Some(Ordering::Equal),
-                None => None,
+                Some(Ordering::Less) => Ok(Some(Ordering::Greater)),
+                Some(Ordering::Greater) => Ok(Some(Ordering::Less)),
+                Some(Ordering::Equal) => Ok(Some(Ordering::Equal)),
+                None => Ok(None),
             }
         }
         (9..42, 9..42) => {
@@ -1899,7 +1898,7 @@ pub fn partial_cmp<'a>(b1: &mut ReadBuffer<'a>, b2: &mut ReadBuffer<'a>) -> Opti
                 b1.head += len1;
                 b2.head += len2;
 
-                return Some(Ordering::Greater);
+                return Ok(Some(Ordering::Greater));
             } else if t1 < t2 {
                 //同是整数， 类型较小的，值也较小
                 let len1 = base_type_len(b1, t1);
@@ -1909,7 +1908,7 @@ pub fn partial_cmp<'a>(b1: &mut ReadBuffer<'a>, b2: &mut ReadBuffer<'a>) -> Opti
 
                 b1.head += len1;
                 b2.head += len2;
-                return Some(Ordering::Less);
+                return Ok(Some(Ordering::Less));
             } else if t1 > 14 && t1 < 36 {
                 //同是整数且类型相等， 当类型值在15~35之间时，其表示的数值大小是确定的（-1~19）， 因此， b1与b2相等
                 let len1 = base_type_len(b1, t1);
@@ -1919,7 +1918,7 @@ pub fn partial_cmp<'a>(b1: &mut ReadBuffer<'a>, b2: &mut ReadBuffer<'a>) -> Opti
 
                 b1.head += len1;
                 b2.head += len2;
-                return Some(Ordering::Equal);
+                return Ok(Some(Ordering::Equal));
             } else {
                 //同是整数且类型相等，但并不是常用数字（-1~19），需要读值进行比较
                 return compare_int(b1, b2, t1);
@@ -1933,7 +1932,7 @@ pub fn partial_cmp<'a>(b1: &mut ReadBuffer<'a>, b2: &mut ReadBuffer<'a>) -> Opti
 
             b1.head += len1;
             b2.head += 1;
-            Some(Ordering::Greater)
+            Ok(Some(Ordering::Greater))
         }
         (9..42, _) => {
             //b1是整数， b2是非数字，并且b1的类型值更小，则b1更小
@@ -1943,7 +1942,7 @@ pub fn partial_cmp<'a>(b1: &mut ReadBuffer<'a>, b2: &mut ReadBuffer<'a>) -> Opti
             b2.bytes.advance(len2);
             b1.head += len1;
             b2.head += len2;
-            Some(Ordering::Less)
+            Ok(Some(Ordering::Less))
         }
         (0..3, _) => {
             //b1是null, true或false， 理论上除了与自身相等， 无法与其他类型的值进行比较， 规定其大小与其类型值保持一致
@@ -1954,11 +1953,11 @@ pub fn partial_cmp<'a>(b1: &mut ReadBuffer<'a>, b2: &mut ReadBuffer<'a>) -> Opti
             b2.bytes.advance(len2);
             if t2 > t1 {
                 //t1小于3， t2大于t1,
-                return Some(Ordering::Less);
+                return Ok(Some(Ordering::Less));
             } else if t2 < t1 {
-                return Some(Ordering::Greater);
+                return Ok(Some(Ordering::Greater));
             } else {
-                return Some(Ordering::Equal);
+                return Ok(Some(Ordering::Equal));
             }
         }
         (42..111, _) => {
@@ -1972,7 +1971,7 @@ pub fn partial_cmp<'a>(b1: &mut ReadBuffer<'a>, b2: &mut ReadBuffer<'a>) -> Opti
 
                 b1.head += len1;
                 b2.head += len2;
-                return Some(Ordering::Less);
+                return Ok(Some(Ordering::Less));
             } else if t2 < 42 {
                 //b1是字符串， b2是非字符串，且b1的类型值更大， 则b1更大
                 let len1 = base_type_len(b1, t1);
@@ -1982,7 +1981,7 @@ pub fn partial_cmp<'a>(b1: &mut ReadBuffer<'a>, b2: &mut ReadBuffer<'a>) -> Opti
 
                 b1.head += len1;
                 b2.head += len2;
-                return Some(Ordering::Greater);
+                return Ok(Some(Ordering::Greater));
             } else {
                 //b1是字符串， b2也是字符串，需要读值比较字符串的二进制数据的大小
                 return compare_str(b1, b2);
@@ -1999,7 +1998,7 @@ pub fn partial_cmp<'a>(b1: &mut ReadBuffer<'a>, b2: &mut ReadBuffer<'a>) -> Opti
 
                 b1.head += len1;
                 b2.head += len2;
-                return Some(Ordering::Less);
+                return Ok(Some(Ordering::Less));
             } else if t2 < 111 {
                 // b1是二进制， b2是非二进制，且b1的类型值更大， 则b1更大
                 let len1 = base_type_len(b1, t1);
@@ -2009,14 +2008,14 @@ pub fn partial_cmp<'a>(b1: &mut ReadBuffer<'a>, b2: &mut ReadBuffer<'a>) -> Opti
 
                 b1.head += len1;
                 b2.head += len2;
-                return Some(Ordering::Greater);
+                return Ok(Some(Ordering::Greater));
             } else {
                 // b1是二进制， b2也是二进制，需要读值比二进制数据的大小
-                return compare_bin(b1, b2);
+                return Ok(compare_bin(b1, b2));
             }
         }
         (_, 0) => {
-            return Some(Ordering::Greater);
+            return Ok(Some(Ordering::Greater));
         }
         (249, 249) => {
             // b1.head += 32;
@@ -2025,7 +2024,7 @@ pub fn partial_cmp<'a>(b1: &mut ReadBuffer<'a>, b2: &mut ReadBuffer<'a>) -> Opti
             // BigInt::from_bytes_le(Sign::Plus, &b1.bytes[b1.head - 32..b1.head]);
             let b1n = to_bigint(b1);
             let b2n = to_bigint(b2);
-            return b1n.partial_cmp(&b2n);
+            return Ok(b1n.partial_cmp(&b2n));
         }
         _ => {
             // b1是容器， b2也是二进制，需要读值比二进制数据的大小
@@ -2038,10 +2037,10 @@ pub fn partial_cmp<'a>(b1: &mut ReadBuffer<'a>, b2: &mut ReadBuffer<'a>) -> Opti
 
                 b1.head += len1;
                 b2.head += len2;
-                return Some(Ordering::Greater);
+                return Ok(Some(Ordering::Greater));
             } else {
                 // b1是容器， b2也是容器，需要读值比容器二进制数据的大小
-                return compare_contain(b1, b2);
+                return Ok(compare_contain(b1, b2));
             }
         }
     }
@@ -2137,34 +2136,39 @@ fn compare_number<'a>(rb: &mut ReadBuffer<'a>, v1: f64, t2: u8) -> Option<Orderi
     v1.partial_cmp(&v2)
 }
 
-fn compare_int<'a>(rb1: &mut ReadBuffer<'a>, rb2: &mut ReadBuffer<'a>, t: u8) -> Option<Ordering> {
+fn compare_int<'a>(rb1: &mut ReadBuffer<'a>, rb2: &mut ReadBuffer<'a>, t: u8) -> Result<Option<Ordering>, ReadBonErr> {
     let err = "compare_int";
     match t {
-        9..14 => rb1
-            .read_i64()
-            .expect(err)
-            .partial_cmp(&rb2.read_i64().expect(err)),
-        14 => rb1
-            .read_i128()
-            .expect(err)
-            .partial_cmp(&rb2.read_i128().expect(err)),
-        36..41 => rb1
-            .read_u64()
-            .expect(err)
-            .partial_cmp(&rb2.read_u64().expect(err)),
-        41 => rb1
-            .read_u128()
-            .expect(err)
-            .partial_cmp(&rb2.read_u128().expect(err)),
-        _ => panic!("t is not int:{}", t),
+        9..14 => {
+            let v1 = rb1.read_i64()?;
+            let v2 = rb2.read_i64()?;
+            Ok(v1.partial_cmp(&v2))
+        },
+        14 => 
+        {
+            let v1 = rb1.read_i128()?;
+            let v2 = rb2.read_i128()?;
+            Ok(v1.partial_cmp(&v2))
+        },
+        36..41 => {
+            let v1 = rb1.read_u64()?;
+            let v2 = rb2.read_u64()?;
+            Ok(v1.partial_cmp(&v2))
+        },
+        41 => {
+            let v1 = rb1.read_u128()?;
+            let v2 = rb2.read_u128()?;
+            Ok(v1.partial_cmp(&v2))
+        }
+        _ => Err(ReadBonErr::type_no_match("integer".to_string(), t, rb1.head - 1)),
     }
 }
 
-fn compare_str<'a>(rb1: &mut ReadBuffer<'a>, rb2: &mut ReadBuffer<'a>) -> Option<Ordering> {
+fn compare_str<'a>(rb1: &mut ReadBuffer<'a>, rb2: &mut ReadBuffer<'a>) -> Result<Option<Ordering>, ReadBonErr> {
     rb1.head += 1;
     rb2.head += 1;
-    let t1 = rb1.get_type().unwrap();
-    let t2 = rb2.get_type().unwrap();
+    let t1 = rb1.get_type()?;
+    let t2 = rb2.get_type()?;
     let len1 = match t1 {
         42..107 => (t1 - 42) as usize,
         107 => {
@@ -2183,9 +2187,7 @@ fn compare_str<'a>(rb1: &mut ReadBuffer<'a>, rb2: &mut ReadBuffer<'a>) -> Option
             rb1.head += 6;
             rb1.bytes.get_u16_le() as usize + (rb1.bytes.get_u32_le() * 0x10000) as usize
         }
-        _ => {
-            panic!("t1 is not str:{}", t1);
-        }
+        _ => return Err(ReadBonErr::type_no_match("string".to_string(), t1, rb1.head - 1)),
     };
 
     let len2 = match t2 {
@@ -2206,9 +2208,7 @@ fn compare_str<'a>(rb1: &mut ReadBuffer<'a>, rb2: &mut ReadBuffer<'a>) -> Option
             rb2.head += 6;
             rb2.bytes.get_u16_le() as usize + (rb2.bytes.get_u32_le() * 0x10000) as usize
         }
-        _ => {
-            panic!("t2 is not str:{}", t2);
-        }
+        _ => return Err(ReadBonErr::type_no_match("string".to_string(), t2, rb2.head - 1)),
     };
 
     rb1.head += len1;
@@ -2221,7 +2221,7 @@ fn compare_str<'a>(rb1: &mut ReadBuffer<'a>, rb2: &mut ReadBuffer<'a>) -> Option
     let dst2 = rb2.bytes.copy_to_bytes(len2);
 
     // rb1.bytes[rb1.head - len1..rb1.head].partial_cmp(&rb2.bytes[rb2.head - len2..rb2.head])
-    dst1.partial_cmp(&dst2)
+    Ok(dst1.partial_cmp(&dst2))
 }
 
 fn compare_bin<'a>(rb1: &mut ReadBuffer<'a>, rb2: &mut ReadBuffer<'a>) -> Option<Ordering> {
@@ -2600,6 +2600,7 @@ mod tests {
                 for elem in e {
                     w1.write_i32(elem.clone());
                 }
+                Ok(())
             },
             None,
         );
@@ -2616,6 +2617,7 @@ mod tests {
                 for elem in e {
                     w2.write_i32(elem.clone());
                 }
+                Ok(())
             },
             None,
         );
@@ -2645,6 +2647,7 @@ mod tests {
                                 s.push(ch);
                             });
                             w2.write_utf8(&s);
+                            Ok(())
                         },
                         None,
                     );
