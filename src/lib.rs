@@ -218,7 +218,10 @@ impl<'a> Ord for ReadBuffer<'a> {
     fn cmp(&self, other: &ReadBuffer<'a>) -> Ordering {
         match self.partial_cmp(other) {
             Some(v) => v,
-            None => panic!("partial_cmp fail self:{:?}, other:{:?}", self, other),
+            None => {
+                log::warn!("pi_bon Ord fail self:{:?}, other:{:?}", self, other);
+                Ordering::Less
+            }
         }
     }
 }
@@ -806,7 +809,10 @@ impl Ord for WriteBuffer {
     fn cmp(&self, other: &WriteBuffer) -> Ordering {
         match self.partial_cmp(other) {
             Some(v) => v,
-            None => panic!("partial_cmp fail self:{:?}, other:{:?}", self, other),
+            None => {
+                log::warn!("partial_cmp fail self:{:?}, other:{:?}", self, other);
+                Ordering::Less
+            }
         }
     }
 }
@@ -2113,7 +2119,11 @@ pub fn base_type_len(bb: &mut ReadBuffer, t: u8) -> Result<usize, ReadBonErr> {
     Ok(len)
 }
 
-fn compare_number<'a>(rb: &mut ReadBuffer<'a>, v1: f64, t2: u8) -> Result<Option<Ordering>, ReadBonErr> {
+fn compare_number<'a>(
+    rb: &mut ReadBuffer<'a>,
+    v1: f64,
+    t2: u8,
+) -> Result<Option<Ordering>, ReadBonErr> {
     let v2 = match t2 {
         3..8 => rb.read_f64()?,
         9..14 => rb.read_i64()? as f64,
@@ -2133,13 +2143,7 @@ fn compare_number<'a>(rb: &mut ReadBuffer<'a>, v1: f64, t2: u8) -> Result<Option
             rb.bytes.advance(17);
             return Ok(Some(Ordering::Less));
         }
-        _ => {
-            return Err(ReadBonErr::type_no_match(
-                "number".to_string(),
-                t2,
-                rb.head,
-            ))
-        },
+        _ => return Err(ReadBonErr::type_no_match("number".to_string(), t2, rb.head)),
     };
     if v1.is_nan() {
         if v2.is_nan() {
@@ -2261,7 +2265,10 @@ fn compare_str<'a>(
     Ok(dst1.partial_cmp(&dst2))
 }
 
-fn compare_bin<'a>(rb1: &mut ReadBuffer<'a>, rb2: &mut ReadBuffer<'a>) -> Result<Option<Ordering>, ReadBonErr> {
+fn compare_bin<'a>(
+    rb1: &mut ReadBuffer<'a>,
+    rb2: &mut ReadBuffer<'a>,
+) -> Result<Option<Ordering>, ReadBonErr> {
     rb1.head += 1;
     rb2.head += 1;
     let t1 = rb1.get_type()?;
@@ -2284,9 +2291,7 @@ fn compare_bin<'a>(rb1: &mut ReadBuffer<'a>, rb2: &mut ReadBuffer<'a>) -> Result
             rb1.head += 6;
             rb1.bytes.get_u16_le() as usize + (rb1.bytes.get_u32_le() * 0x10000) as usize
         }
-        _ => {
-            return Err(ReadBonErr::Other(format!("t1 is not bin:{}", t1)))
-        }
+        _ => return Err(ReadBonErr::Other(format!("t1 is not bin:{}", t1))),
     };
 
     let len2 = match t2 {
@@ -2307,9 +2312,7 @@ fn compare_bin<'a>(rb1: &mut ReadBuffer<'a>, rb2: &mut ReadBuffer<'a>) -> Result
             rb2.head += 6;
             rb2.bytes.get_u16_le() as usize + (rb2.bytes.get_u32_le() * 0x10000) as usize
         }
-        _ => {
-            return Err(ReadBonErr::Other(format!("t2 is not bin:{}", t2)))
-        }
+        _ => return Err(ReadBonErr::Other(format!("t2 is not bin:{}", t2))),
     };
 
     rb1.head += len1;
@@ -2322,7 +2325,10 @@ fn compare_bin<'a>(rb1: &mut ReadBuffer<'a>, rb2: &mut ReadBuffer<'a>) -> Result
     // rb1.bytes[rb1.head - len1..rb1.head].partial_cmp(&rb2.bytes[rb2.head - len2..rb2.head])
 }
 
-fn compare_contain<'a>(rb1: &mut ReadBuffer<'a>, rb2: &mut ReadBuffer<'a>) -> Result<Option<Ordering>, ReadBonErr> {
+fn compare_contain<'a>(
+    rb1: &mut ReadBuffer<'a>,
+    rb2: &mut ReadBuffer<'a>,
+) -> Result<Option<Ordering>, ReadBonErr> {
     let t1 = rb1.get_type()?;
     let t2 = rb2.get_type()?;
     rb1.head += 1;
@@ -2346,7 +2352,10 @@ fn compare_contain<'a>(rb1: &mut ReadBuffer<'a>, rb2: &mut ReadBuffer<'a>) -> Re
             rb1.bytes.get_u16_le() as usize + (rb1.bytes.get_u32_le() * 0x10000) as usize
         }
         _ => {
-            return Err(ReadBonErr::Other(format!("Invalid contain type t1: {}", t1)));
+            return Err(ReadBonErr::Other(format!(
+                "Invalid contain type t1: {}",
+                t1
+            )));
         }
     };
 
@@ -2369,7 +2378,10 @@ fn compare_contain<'a>(rb1: &mut ReadBuffer<'a>, rb2: &mut ReadBuffer<'a>) -> Re
             rb2.bytes.get_u16_le() as usize + (rb2.bytes.get_u32_le() * 0x10000) as usize
         }
         _ => {
-            return Err(ReadBonErr::Other(format!("Invalid contain type t2: {}", t2)));
+            return Err(ReadBonErr::Other(format!(
+                "Invalid contain type t2: {}",
+                t2
+            )));
         }
     };
 
