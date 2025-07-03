@@ -220,7 +220,7 @@ impl<'a> Ord for ReadBuffer<'a> {
             Some(v) => v,
             None => {
                 log::warn!("pi_bon Ord fail self:{:?}, other:{:?}", self, other);
-                Ordering::Less
+                Ordering::Equal
             }
         }
     }
@@ -811,7 +811,7 @@ impl Ord for WriteBuffer {
             Some(v) => v,
             None => {
                 log::warn!("partial_cmp fail self:{:?}, other:{:?}", self, other);
-                Ordering::Less
+                Ordering::Equal
             }
         }
     }
