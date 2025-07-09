@@ -182,6 +182,10 @@ impl<'a> PartialOrd for ReadBuffer<'a> {
                 }
             }
             b2.bytes.advance(b2.head);
+        } else if is_b1_container {
+            return Some(Ordering::Greater);
+        } else if is_b2_container {
+            return Some(Ordering::Less);
         }
 
         loop {
@@ -2672,6 +2676,13 @@ mod tests {
         );
 
         assert!(w1 > w2);
+
+        let mut buf5 = WriteBuffer::with_bytes(Vec::new(), 0);
+        buf5.write_f32(1.0);
+        let read_buf5 = ReadBuffer::new(buf5.get_byte(), 0);
+        let read_w2 = ReadBuffer::new(w2.get_byte(), 0);
+        assert!(read_w2 > read_buf5);
+        assert!(read_buf5 < read_w2);
     }
 
     macro_rules! bench_container_cmp {
