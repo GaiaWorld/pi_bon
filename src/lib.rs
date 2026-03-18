@@ -189,6 +189,10 @@ impl<'a> PartialOrd for ReadBuffer<'a> {
         }
 
         loop {
+            // 如果两个 buffer 都为空，说明比较结束且相等
+            if b1.len() == 0 && b2.len() == 0 {
+                return Some(Ordering::Equal);
+            }
             match partial_cmp(&mut b1, &mut b2) {
                 Ok(None) => return None,
                 Ok(Some(Ordering::Equal)) => {
@@ -2051,9 +2055,46 @@ pub fn partial_cmp<'a>(
             return Ok(b1n.partial_cmp(&b2n));
         }
         _ => {
-            // b1是容器， b2也是二进制，需要读值比二进制数据的大小
+            // 处理容器类型（180..249），避免调用 base_type_len(246) 报错
+            if t1 >= 180 && t1 < 249 {
+                // 计算容器头部长度：类型(1) + 长度字段 + hash(4)
+                let header_len = match t1 {
+                    180..245 => 1 + 1 + 4,      // 1字节长度
+                    245 => 1 + 1 + 1 + 4,       // 额外1字节长度
+                    246 => 1 + 2 + 4,           // 2字节长度
+                    247 => 1 + 4 + 4,           // 4字节长度
+                    248 => 1 + 6 + 4,           // 6字节长度
+                    _ => return Err(ReadBonErr::Other(format!("Unknown container type: {}", t1))),
+                };
+                b1.head += header_len;
+                b1.bytes.advance(header_len);
+
+                if t2 >= 180 && t2 < 249 {
+                    // b1和b2都是容器，跳过b2的头部
+                    let header_len2 = match t2 {
+                        180..245 => 1 + 1 + 4,
+                        245 => 1 + 1 + 1 + 4,
+                        246 => 1 + 2 + 4,
+                        247 => 1 + 4 + 4,
+                        248 => 1 + 6 + 4,
+                        _ => return Err(ReadBonErr::Other(format!("Unknown container type: {}", t2))),
+                    };
+                    b2.head += header_len2;
+                    b2.bytes.advance(header_len2);
+                    // 返回 Equal，让外层 loop 继续比较容器内的元素
+                    return Ok(Some(Ordering::Equal));
+                } else {
+                    // b1是容器，b2是非容器 → 容器更大
+                    let len2 = base_type_len(b2, t2)?;
+                    b2.head += len2;
+                    b2.bytes.advance(len2);
+                    return Ok(Some(Ordering::Greater));
+                }
+            }
+
+            // 原有逻辑：处理非容器类型
             if t2 < 180 {
-                // b1是容器， b2是非容器，b1的类型值更大， 则b1更大
+                // b1是非容器，b2也是非容器
                 let len1 = base_type_len(b1, t1)?;
                 let len2 = base_type_len(b2, t2)?;
                 b1.bytes.advance(len1);
@@ -2063,8 +2104,14 @@ pub fn partial_cmp<'a>(
                 b2.head += len2;
                 return Ok(Some(Ordering::Greater));
             } else {
-                // b1是容器， b2也是容器，需要读值比容器二进制数据的大小
-                return compare_contain(b1, b2);
+                // b1是非容器，b2是容器 → b2更大
+                let len1 = base_type_len(b1, t1)?;
+                b1.head += len1;
+                b1.bytes.advance(len1);
+
+                b2.head += 1;
+                b2.bytes.advance(1);
+                return Ok(Some(Ordering::Less));
             }
         }
     }
@@ -2683,6 +2730,177 @@ mod tests {
         let read_w2 = ReadBuffer::new(w2.get_byte(), 0);
         assert!(read_w2 > read_buf5);
         assert!(read_buf5 < read_w2);
+    }
+
+    // 测试：复现 "Unknown type code: 246" 错误
+    #[test]
+    fn test_container_with_non_container_type_246() {
+        // 测试1：直接调用 partial_cmp 函数
+        // 使用 write_container 创建类型码246的容器
+
+        let mut w1_inner = WriteBuffer::new();
+        w1_inner.write_container(
+            &100u32,
+            |w, val| {
+                let hash = 0x87654321u32.to_le_bytes();
+                w.bytes.extend_from_slice(&hash);
+                w.tail += 4;
+                w.write_u32(*val);
+                Ok(())
+            },
+            Some(0xffff),  // 触发类型码246
+        ).ok();
+
+        let bytes1 = w1_inner.get_byte();
+        let bytes2 = vec![38, 50, 0, 0, 0];  // u32 值 50
+
+        let rb1 = &mut ReadBuffer::new(&bytes1, 0);
+        let rb2 = &mut ReadBuffer::new(&bytes2, 0);
+
+        // 修复后：直接调用 partial_cmp 函数不再报错
+        let result = crate::partial_cmp(rb1, rb2);
+        println!("partial_cmp function result: {:?}", result);
+        // 容器 > 非容器
+        assert_eq!(result.unwrap(), Some(std::cmp::Ordering::Greater));
+
+        // 测试2：通过 PartialOrd trait 调用
+        let w1 = w1_inner;
+        let mut w2 = WriteBuffer::new();
+        w2.write_u32(50);
+
+        let trait_result = w1.partial_cmp(&w2);
+        println!("PartialOrd trait result: {:?}", trait_result);
+        assert_eq!(trait_result, Some(std::cmp::Ordering::Greater));
+    }
+
+    // 测试：容器与非容器比较
+    #[test]
+    fn test_container_with_non_container() {
+        let mut w1 = WriteBuffer::new();
+        w1.write_container(
+            &100,
+            |w, _val| {
+                let hash = 0x12345678u32.to_le_bytes();
+                w.bytes.extend_from_slice(&hash);
+                w.tail += 4;
+                w.write_u32(100);
+                Ok(())
+            },
+            None,
+        );
+
+        let mut w2 = WriteBuffer::new();
+        w2.write_u32(50);
+
+        // 容器应该大于非容器
+        assert!(w1 > w2);
+        assert!(w2 < w1);
+    }
+
+    // 测试：两个空容器的比较
+    #[test]
+    fn test_empty_container_cmp() {
+        let mut w1 = WriteBuffer::new();
+        w1.write_container(
+            &(),
+            |w, _val| {
+                let hash = 0x12345678u32.to_le_bytes();
+                w.bytes.extend_from_slice(&hash);
+                w.tail += 4;
+                Ok(())
+            },
+            None,
+        );
+
+        let mut w2 = WriteBuffer::new();
+        w2.write_container(
+            &(),
+            |w, _val| {
+                let hash = 0x12345678u32.to_le_bytes();
+                w.bytes.extend_from_slice(&hash);
+                w.tail += 4;
+                Ok(())
+            },
+            None,
+        );
+
+        // 调试：查看生成的数据
+        println!("w1 bytes: {:?}", w1.get_byte());
+        println!("w2 bytes: {:?}", w2.get_byte());
+
+        // 两个空容器应该相等
+        assert_eq!(w1, w2);
+    }
+
+    // 测试：两个容器，内部元素类型不同（一个含子容器，一个含u32）
+    // 使用 write_container 创建外层容器，手动插入子容器数据
+    #[test]
+    fn test_nested_container_with_primitive() {
+        // 先创建子容器数据（类型码246）
+        let mut inner = WriteBuffer::new();
+        inner.write_container(
+            &100u32,
+            |w, val| {
+                let hash = 0x87654321u32.to_le_bytes();
+                w.bytes.extend_from_slice(&hash);
+                w.tail += 4;
+                w.write_u32(*val);
+                Ok(())
+            },
+            Some(0xffff),  // 触发类型码246
+        ).ok();
+
+        let inner_bytes = inner.get_byte();
+        println!("inner container bytes: {:?}", inner_bytes);
+        assert_eq!(inner_bytes[0], 246, "Inner container should have type code 246");
+
+        // 创建外层容器1：包含子容器
+        let mut w1 = WriteBuffer::new();
+        w1.write_container(
+            &(),
+            |w, _| {
+                let hash = 0x12345678u32.to_le_bytes();
+                w.bytes.extend_from_slice(&hash);
+                w.tail += 4;
+                // 直接写入子容器的字节数据
+                w.bytes.extend_from_slice(&inner_bytes);
+                w.tail += inner_bytes.len();
+                Ok(())
+            },
+            None,  // 使用默认预估，不会触发246
+        ).ok();
+
+        // 创建外层容器2：只包含u32
+        let mut w2 = WriteBuffer::new();
+        w2.write_container(
+            &50u32,
+            |w, val| {
+                let hash = 0x12345678u32.to_le_bytes();
+                w.bytes.extend_from_slice(&hash);
+                w.tail += 4;
+                w.write_u32(*val);
+                Ok(())
+            },
+            None,
+        ).ok();
+
+        println!("w1 bytes: {:?}", w1.get_byte());
+        println!("w2 bytes: {:?}", w2.get_byte());
+
+        // 检查两个容器是否都被识别为容器
+        let w1_first = w1.get_byte()[0];
+        let w2_first = w2.get_byte()[0];
+        println!("w1 first byte: {} (container? {})", w1_first, w1_first >= 180 && w1_first < 249);
+        println!("w2 first byte: {} (container? {})", w2_first, w2_first >= 180 && w2_first < 249);
+
+        // 如果双方都是容器，会进入 loop 比较内部元素
+        // 内部元素：子容器(246) vs u32(38)
+        // 这会触发 "Unknown type code: 246" 错误
+        let result = w1.partial_cmp(&w2);
+        println!("Comparison result: {:?}", result);
+
+        // 当前实现会因为错误返回 None
+        // 修复后应该能正确比较
     }
 
     macro_rules! bench_container_cmp {
