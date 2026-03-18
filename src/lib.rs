@@ -2203,6 +2203,9 @@ fn compare_number<'a>(
             return Ok(Some(Ordering::Less));
         }
     }
+    if v2.is_nan() {
+        return Ok(Some(Ordering::Greater));
+    }
     Ok(v1.partial_cmp(&v2))
 }
 
